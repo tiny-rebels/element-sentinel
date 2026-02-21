@@ -47,10 +47,7 @@ class EloquentActivationRepository implements ActivationRepositoryInterface {
      */
     public function exists(UserInterface $userObject): bool {
 
-        return EloquentActivation::query()
-            ->where('user_id', $userObject->getId())
-            ->whereNull('completed_at')
-            ->exists();
+        return EloquentActivation::query()->where('user_id', '=', $userObject->getId())->whereNull('completed_at')->exists();
     }
 
     /**
@@ -60,11 +57,7 @@ class EloquentActivationRepository implements ActivationRepositoryInterface {
      */
     public function findOpenByUser(UserInterface $userObject): ?ActivationInterface {
 
-        return EloquentActivation::query()
-            ->where('user_id', $userObject->getId())
-            ->whereNull('completed_at')
-            ->orderByDesc('created_at')
-            ->first();
+        return EloquentActivation::query()->where('user_id', '=', $userObject->getId())->whereNull('completed_at')->orderByDesc('created_at')->first();
     }
 
     /**
@@ -74,9 +67,7 @@ class EloquentActivationRepository implements ActivationRepositoryInterface {
      */
     public function findByCode($activationCode): ?ActivationInterface {
 
-        return EloquentActivation::query()
-            ->where('code', $activationCode)
-            ->first();
+        return EloquentActivation::query()->where('code', '=', $activationCode)->first();
     }
 
     /**
@@ -87,11 +78,7 @@ class EloquentActivationRepository implements ActivationRepositoryInterface {
      */
     public function complete(UserInterface $userObject, $activationCode): bool {
 
-        $activationRecord = EloquentActivation::query()
-            ->where('user_id', $userObject->getId())
-            ->where('code', $activationCode)
-            ->whereNull('completed_at')
-            ->first();
+        $activationRecord = EloquentActivation::query()->where('user_id', '=', $userObject->getId())->where('code', '=', $activationCode)->whereNull('completed_at')->first();
 
         if (!$activationRecord) {
 

@@ -2,26 +2,29 @@
 
 namespace Element\Sentinel;
 
-use Element\Sentinel\{
-    Contracts\ActivationRepositoryInterface,
-    Contracts\PasswordHasherInterface,
-    Contracts\UserInterface,
-    Contracts\UserRepositoryInterface,
-    Support\NativePasswordHasher
+use Element\Sentinel\Contracts\{
+    ActivationRepositoryInterface,
+    CredentialsRepositoryInterface,
+    PasswordHasherInterface,
+    PersistenceRepositoryInterface,
+    UserInterface,
+    UserRepositoryInterface,
+    AuthManagerInterface
 };
+
+use Element\Sentinel\Support\NormalizeConfig;
 
 use Psr\Log\LoggerInterface;
 
 /**
- * Core Sentinel entry point.
+ * Sentinel (Facade)
  *
- * Responsibilities:
- * - Activation workflow (ensureActivationCode / activateByCode)
- * - Password hashing helpers (hash/verify/needsRehash)
- * - Accessors to repositories (users / activations)
- * - Static deploy() that wires the instance from a simple config array
- * - Optional PSR-3 logger support
- * - Static facade-style shortcuts to repos and hasher
+ * Framework-agnostic static facade that exposes:
+ * - deploy(array $config): build the global instance from normalized config
+ * - repository shortcuts: users(), activations(), hasher()
+ * - authentication shortcuts: authenticate(), logout()
+ *
+ * All business logic lives in Services\AuthManager.
  */
 final class Sentinel {
 
@@ -37,170 +40,94 @@ final class Sentinel {
     /** @var LoggerInterface|null */
     private $logger;
 
-    /** @var self|null Global instance set by deploy() for static facade calls */
+    /** @var CredentialsRepositoryInterface|null */
+    private $credentialsRepository;
+
+    /** @var PersistenceRepositoryInterface|null */
+    private $persistenceRepository;
+
+    /** @var AuthManagerInterface|null */
+    private $authManager;
+
+    /** @var self|null */
     private static $instance = null;
 
     /**
-     * Construct a Sentinel instance from concrete dependencies.
+     * Construct a Sentinel facade instance with concrete dependencies.
      *
-     * @param UserRepositoryInterface       $userRepository
-     * @param ActivationRepositoryInterface $activationRepository
-     * @param PasswordHasherInterface       $passwordHasher
-     * @param LoggerInterface|null          $logger
+     * @param UserRepositoryInterface             $userRepository
+     *
+     * @param ActivationRepositoryInterface       $activationRepository
+     *
+     * @param PasswordHasherInterface             $passwordHasher
+     *
+     * @param LoggerInterface|null                $logger
+     *
+     * @param CredentialsRepositoryInterface|null $credentialsRepository
+     *
+     * @param PersistenceRepositoryInterface|null $persistenceRepository
      */
     public function __construct(
         UserRepositoryInterface $userRepository,
         ActivationRepositoryInterface $activationRepository,
         PasswordHasherInterface $passwordHasher,
-        LoggerInterface $logger = null
+        LoggerInterface $logger = null,
+        CredentialsRepositoryInterface $credentialsRepository = null,
+        PersistenceRepositoryInterface $persistenceRepository = null
     ) {
-        $this->userRepository       = $userRepository;
-        $this->activationRepository = $activationRepository;
-        $this->passwordHasher       = $passwordHasher;
-        $this->logger               = $logger;
+        $this->userRepository        = $userRepository;
+        $this->activationRepository  = $activationRepository;
+        $this->passwordHasher        = $passwordHasher;
+        $this->logger                = $logger;
+        $this->credentialsRepository = $credentialsRepository;
+        $this->persistenceRepository = $persistenceRepository;
+        $this->authManager           = null; // bound during deploy()
     }
 
     /**
-     * ------------------------------------------------------------
-     *  STATIC DEPLOY FACTORY
-     * ------------------------------------------------------------
-     *
-     * Bootstrap a fully configured Sentinel instance from a config array.
-     *
-     * Expected $config structure:
-     *
-     * $config = [
-     *   'repositories' => [
-     *       'users'       => UserRepositoryInterface|callable,        // required
-     *       'activations' => ActivationRepositoryInterface|callable,  // required
-     *   ],
-     *   'hasher' => PasswordHasherInterface|callable|'native'|null,   // optional (default 'native')
-     *   'logger' => Psr\Log\LoggerInterface|callable,                 // optional
-     * ];
-     *
-     * Notes:
-     * - Repositories and hasher can be provided as concrete instances
-     *   or as callables/factories returning those instances.
-     * - No database credentials or connection setup is handled here.
-     *
-     * Returns the built instance AND stores it in a static property,
-     * making facade-style calls (Sentinel::users(), etc.) available.
+     * Deploy Sentinel from a (possibly symbolic/file-backed) array config.
+     * Uses Support\NormalizeConfig to produce canonical instances + services.
      *
      * @param array $config
      *
      * @return self
      */
-    public static function deploy(array $config) {
+    public static function deploy(array $config): self {
 
-        if (!isset($config['repositories']['users']) || !isset($config['repositories']['activations'])) {
+        $canonical = NormalizeConfig::normalize($config);
 
-            throw new \InvalidArgumentException(
-                'Missing repositories.users or repositories.activations in config.'
-            );
-        }
+        $userRepository        = $canonical['repositories']['users'];
+        $activationRepository  = $canonical['repositories']['activations'];
+        $credentialsRepository = $canonical['repositories']['credentials'];
+        $persistenceRepository = $canonical['repositories']['persistences'];
+        $passwordHasher        = $canonical['hasher'];
+        $loggerInstance        = isset($canonical['logger']) ? $canonical['logger'] : null;
 
-        // Resolve repositories (instance or factory)
-        $userRepository         = self::resolveValue($config['repositories']['users']);
-        $activationRepository   = self::resolveValue($config['repositories']['activations']);
+        $instance = new self(
+            $userRepository,
+            $activationRepository,
+            $passwordHasher,
+            $loggerInstance,
+            $credentialsRepository,
+            $persistenceRepository
+        );
 
-        if (!($userRepository instanceof UserRepositoryInterface)) {
+        // Bind the AuthManager service built by NormalizeConfig
+        $instance->authManager = isset($canonical['services']['auth']) ? $canonical['services']['auth'] : null;
 
-            throw new \InvalidArgumentException(
-                'repositories.users must implement UserRepositoryInterface.'
-            );
-        }
-
-        if (!($activationRepository instanceof ActivationRepositoryInterface)) {
-
-            throw new \InvalidArgumentException(
-                'repositories.activations must implement ActivationRepositoryInterface.'
-            );
-        }
-
-        // Resolve password hasher
-        if (!isset($config['hasher']) || $config['hasher'] === 'native' || $config['hasher'] === null) {
-
-            $passwordHasher = new NativePasswordHasher();
-
-        } else {
-
-            $passwordHasher = self::resolveValue($config['hasher']);
-        }
-
-        if (!($passwordHasher instanceof PasswordHasherInterface)) {
-
-            throw new \InvalidArgumentException(
-                'hasher must implement PasswordHasherInterface or be "native".'
-            );
-        }
-
-        // Resolve optional logger
-        $logger = null;
-
-        if (isset($config['logger'])) {
-
-            $resolvedLogger = self::resolveValue($config['logger']);
-
-            if ($resolvedLogger instanceof LoggerInterface) {
-
-                $logger = $resolvedLogger;
-
-            } else {
-
-                throw new \InvalidArgumentException('logger must implement Psr\Log\LoggerInterface.');
-            }
-        }
-
-
-        // Build via existing builder
-        $builder = Builder::create()
-            ->withUserRepository($userRepository)
-            ->withActivationRepository($activationRepository)
-            ->withPasswordHasher($passwordHasher);
-
-        // Tilføj kun logger hvis en faktisk instans blev givet
-        if ($logger !== null) {
-
-            $builder->withLogger($logger);
-        }
-
-        $instance = $builder->build();
-
-        // Expose a global instance for static facade-style calls
         self::$instance = $instance;
 
         return $instance;
     }
 
     /**
-     * Resolve a direct instance or execute a factory callable.
-     *
-     * @param mixed $value
-     *
-     * @return mixed
-     */
-    private static function resolveValue($value) {
-
-        if (is_callable($value)) {
-
-            return $value();
-        }
-
-        return $value;
-    }
-
-    /**
-     * ------------------------------------------------------------
-     *  FACADE-STYLE STATIC SHORTCUTS
-     * ------------------------------------------------------------
-     */
-
-    /**
-     * Get the global Sentinel instance previously set by deploy().
+     * Get the global Sentinel instance set by deploy().
      *
      * @return self
+     *
+     * @throws \RuntimeException
      */
-    public static function instance() {
+    public static function instance(): self {
 
         if (!self::$instance) {
 
@@ -211,227 +138,125 @@ final class Sentinel {
     }
 
     /**
-     * Repository shortcut (singular): user() → users repository.
+     * Repository shortcut: users().
      *
      * @return UserRepositoryInterface
      */
-    public static function user() {
+    public static function users(): UserRepositoryInterface {
 
         return self::instance()->userRepository;
     }
 
     /**
-     * Repository shortcut (plural): users() → users repository.
-     *
-     * @return UserRepositoryInterface
-     */
-    public static function users() {
-
-        return self::instance()->userRepository;
-    }
-
-    /**
-     * Repository shortcut (singular): activation() → activations repository.
+     * Repository shortcut: activations().
      *
      * @return ActivationRepositoryInterface
      */
-    public static function activation() {
+    public static function activations(): ActivationRepositoryInterface {
 
         return self::instance()->activationRepository;
     }
 
     /**
-     * Repository shortcut (plural): activations() → activations repository.
-     *
-     * @return ActivationRepositoryInterface
-     */
-    public static function activations() {
-
-        return self::instance()->activationRepository;
-    }
-
-    /**
-     * Shortcut to the configured password hasher.
+     * Shortcut: hasher() → password hasher instance.
      *
      * @return PasswordHasherInterface
      */
-    public static function hasher() {
+    public static function hasher(): PasswordHasherInterface {
 
         return self::instance()->passwordHasher;
     }
 
     /**
-     * ------------------------------------------------------------
-     *  ACTIVATION METHODS (instance API)
-     * ------------------------------------------------------------
-     */
-
-    /**
-     * Ensure an activation record exists for a user and return its code.
-     *
-     * @param UserInterface $user
-     *
-     * @return string
-     */
-    public function ensureActivationCode(UserInterface $user) {
-
-        $openActivation = $this->activationRepository->findOpenByUser($user);
-
-        if ($openActivation) {
-
-            if ($this->logger) {
-
-                $this->logger->info('Sentinel: reused existing activation code for user', [
-                    'user_id' => $user->getId(),
-                ]);
-            }
-
-            return $openActivation->getCode();
-        }
-
-        // Create new activation
-        $createdActivation = $this->activationRepository->create($user);
-
-        if ($this->logger) {
-
-            $this->logger->info('Sentinel: created activation code for user', [
-                'user_id' => $user->getId(),
-            ]);
-        }
-
-        return $createdActivation->getCode();
-    }
-
-    /**
-     * Complete activation by code. Returns false if invalid or already completed.
-     *
-     * @param string $activationCode
-     *
-     * @return bool
-     */
-    public function activateByCode($activationCode) {
-
-        $activationRecord = $this->activationRepository->findByCode($activationCode);
-
-        if (!$activationRecord) {
-
-            if ($this->logger) {
-
-                $this->logger->warning('Sentinel: activation code not found', [
-                    'code' => $activationCode,
-                ]);
-            }
-
-            return false;
-        }
-
-        if ($activationRecord->isCompleted()) {
-
-            if ($this->logger) {
-
-                $this->logger->notice('Sentinel: activation code already used', [
-                    'code' => $activationCode,
-                ]);
-            }
-
-            return false;
-        }
-
-        $user = $this->userRepository->findById($activationRecord->getUserId());
-
-        if (!$user) {
-
-            if ($this->logger) {
-
-                $this->logger->error('Sentinel: activation found but user missing', [
-                    'code'    => $activationCode,
-                    'user_id' => $activationRecord->getUserId(),
-                ]);
-            }
-
-            return false;
-        }
-
-        $completed = $this->activationRepository->complete($user, $activationCode);
-
-        if ($this->logger) {
-
-            $this->logger->info('Sentinel: activation completed', [
-                'code'    => $activationCode,
-                'user_id' => $user->getId(),
-                'result'  => $completed,
-            ]);
-        }
-
-        return $completed;
-    }
-
-    /**
-     * ------------------------------------------------------------
-     *  PASSWORD HELPERS (instance API)
-     * ------------------------------------------------------------
-     */
-
-    /**
-     * @param string $plainPassword
-     *
-     * @return string
-     */
-    public function hashPassword($plainPassword) {
-
-        return $this->passwordHasher->hash($plainPassword);
-    }
-
-    /**
-     * @param string $plainPassword
-     * @param string $storedHash
-     *
-     * @return bool
-     */
-    public function verifyPassword($plainPassword, $storedHash) {
-
-        return $this->passwordHasher->verify($plainPassword, $storedHash);
-    }
-
-    /**
-     * @param string $storedHash
-     *
-     * @return bool
-     */
-    public function passwordNeedsRehash($storedHash) {
-
-        return $this->passwordHasher->needsRehash($storedHash);
-    }
-
-    /**
-     * ------------------------------------------------------------
-     *  ACCESSORS (instance API)
-     * ------------------------------------------------------------
-     */
-
-    /**
-     * @return UserRepositoryInterface
-     */
-//    public function users() {
-//
-//        return $this->userRepository;
-//    }
-
-    /**
-     * @return ActivationRepositoryInterface
-     */
-//    public function activations() {
-//
-//        return $this->activationRepository;
-//    }
-
-    /**
-     * Optional: expose logger if needed elsewhere.
+     * Optional access to configured logger.
      *
      * @return LoggerInterface|null
      */
-    public function logger() {
+    public function logger(): ?LoggerInterface {
 
         return $this->logger;
+    }
+
+    /**
+     * Authenticate via the AuthManager service (static convenience).
+     *
+     * Expected input:
+     * [
+     *   'email'    => 'user@example.com',
+     *   'password' => 'PlainTextOrInput',
+     * ]
+     *
+     * @param array{email:string,password:string} $credentials
+     *
+     * @param bool $remember         If true, create a remember-me token and cookie.
+     *
+     * @param bool $requireActivated If true, the user must be activated.
+     *
+     * @return UserInterface|null
+     */
+    public static function authenticate(array $credentials, bool $remember = false, bool $requireActivated = true): ?UserInterface {
+
+        $core = self::instance();
+
+        if (!$core->authManager) {
+
+            throw new \RuntimeException('AuthManager service not available. Check NormalizeConfig/deploy wiring.');
+        }
+
+        return $core->authManager->authenticate($credentials, $remember, $requireActivated);
+    }
+
+    /**
+     * Determine if the current visitor is a guest (not authenticated).
+     *
+     * This is a static convenience wrapper calling into the UserRepository's check()
+     * which itself handles both session-based and remember-me authentication.
+     *
+     * @return bool True if not authenticated, false otherwise.
+     */
+    public static function guest(): bool {
+
+        $core = self::instance();
+
+        // UserRepository::check() returns UserInterface|null
+        $user = $core->userRepository->check();
+
+        return $user === null;
+    }
+
+    /**
+     * Logout via the AuthManager service (static convenience).
+     *
+     * @return void
+     */
+    public static function logout(): void {
+
+        $core = self::instance();
+
+        if (!$core->authManager) {
+
+            throw new \RuntimeException('AuthManager service not available. Check NormalizeConfig/deploy wiring.');
+        }
+
+        $core->authManager->logout();
+    }
+
+    /**
+     * Internal logger helper (no-op if no logger is configured).
+     *
+     * @param string $level
+     *
+     * @param string $message
+     *
+     * @param array  $context
+     *
+     * @return void
+     */
+    private function log($level, $message, array $context = []): void {
+
+        if ($this->logger && method_exists($this->logger, $level)) {
+
+            $this->logger->{$level}($message, $context);
+        }
     }
 }
