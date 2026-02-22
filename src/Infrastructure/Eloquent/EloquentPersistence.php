@@ -22,14 +22,12 @@ class EloquentPersistence extends Model {
 
         'user_id',
         'code',
-        'created_at',
         'last_used',
     ];
 
     /** @var array<string,string> */
     protected $casts = [
 
-        'created_at' => 'datetime',
         'last_used'  => 'datetime',
     ];
 }

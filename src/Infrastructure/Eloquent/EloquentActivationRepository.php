@@ -35,8 +35,7 @@ class EloquentActivationRepository implements ActivationRepositoryInterface {
 
             'user_id'     => $userObject->getId(),
             'code'        => $activationCode,
-            'completed_at'=> null,
-            'created_at'  => date('Y-m-d H:i:s'),
+            'completed_at'=> null
         ]);
     }
 

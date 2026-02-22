@@ -70,7 +70,22 @@ final class AuthManager implements AuthManagerInterface {
     }
 
     /**
-     * {@inheritdoc}
+     * Authenticate a user by email and password.
+     *
+     * Behavior:
+     * - Accepts ['email' => '...', 'password' => '...'].
+     * - Verifies credentials via credentials repository.
+     * - Starts a PHP session with a session-only cookie (lifetime = 0) and stores the user id.
+     * - Optionally sets a remember-me token/cookie via persistence repository when $remember is true.
+     * - Regenerates the session id on success (fixation protection).
+     *
+     * @param array{ email:string, password:string } $credentials
+     *
+     * @param bool $remember          If true, a persistent remember-me cookie/token is set.
+     *
+     * @param bool $requireActivated  If true, user must be activated to log in.
+     *
+     * @return UserInterface|null
      */
     public function authenticate(array $credentials, bool $remember = false, bool $requireActivated = true): ?UserInterface {
 
@@ -118,6 +133,7 @@ final class AuthManager implements AuthManagerInterface {
             $newHash = $this->passwordHasher->hash($plainPassword);
             $this->credentialsRepository->updatePassword($user, $newHash);
             $this->userRepository->save($user);
+
             $this->log('info', 'AuthManager: password rehashed on login', ['user_id' => $user->getId()]);
         }
 
@@ -125,6 +141,7 @@ final class AuthManager implements AuthManagerInterface {
         if (session_status() === PHP_SESSION_ACTIVE) {
 
             $_SESSION['sentinel_user_id'] = $user->getId();
+
             session_regenerate_id(true);
         }
 
@@ -139,7 +156,7 @@ final class AuthManager implements AuthManagerInterface {
                 $this->log('error', 'AuthManager: remember-me failed', [
 
                     'user_id' => $user->getId(),
-                    'err'     => $exception->getMessage(),
+                    'error'   => $exception->getMessage(),
                 ]);
             }
         }
@@ -148,30 +165,46 @@ final class AuthManager implements AuthManagerInterface {
     }
 
     /**
-     * {@inheritdoc}
+     * Log the current user out by clearing session state and any remember-me artifacts.
+     *
+     * Behavior:
+     * - If a session is active and a user id is present, forget the user server-side (tokens) and clear session.
+     * - If no user id is present but a persistence repository exists, forget the current remember-me token/cookie.
+     * - Always clear the remember-me cookie explicitly and regenerate the session id if a session is active.
+     *
+     * @return void
      */
     public function logout(): void {
 
-        $userId = null;
+        $currentUserId   = null;
+        $isSessionActive = (session_status() === PHP_SESSION_ACTIVE);
 
-        if (session_status() === PHP_SESSION_ACTIVE) {
+        // Read the current user id from session (if available)
+        if ($isSessionActive) {
 
-            $userId = $_SESSION['sentinel_user_id'] ?? null;
+            $currentUserId = isset($_SESSION['sentinel_user_id']) ? $_SESSION['sentinel_user_id'] : null;
         }
 
+        // Server-side & client remember-me cleanup via persistence repository (if configured)
         if ($this->persistenceRepository) {
 
-            if (!empty($userId)) {
+            if (!empty($currentUserId)) {
 
-                $this->persistenceRepository->forgetUser($userId);
+                // Remove all server-side tokens for this user and clear its client cookie
+                $this->persistenceRepository->forgetUser($currentUserId);
 
             } else {
 
+                // No user id in session; forget whatever current token/cookie exists
                 $this->persistenceRepository->forgetCurrent();
             }
+
+            // Always ensure the remember-me cookie itself is cleared (idempotent)
+            $this->persistenceRepository->forgetCookie();
         }
 
-        if (session_status() === PHP_SESSION_ACTIVE) {
+        // Clear session state and regenerate the session id for security
+        if ($isSessionActive) {
 
             unset($_SESSION['sentinel_user_id']);
             session_regenerate_id(true);

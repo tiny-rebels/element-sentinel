@@ -71,7 +71,6 @@ class EloquentPersistenceRepository implements PersistenceRepositoryInterface {
 
             'user_id'   => $userId,
             'code'      => $token,
-            'created_at'=> date('Y-m-d H:i:s'),
             'last_used' => date('Y-m-d H:i:s'),
         ]);
 
@@ -154,5 +153,22 @@ class EloquentPersistenceRepository implements PersistenceRepositoryInterface {
         ];
 
         setcookie($this->cookieName, $value, $params);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function forgetCookie(): void {
+
+        // Idempotent cookie clear – delete regardless of presence
+        // If you need SameSite=None for cross-site contexts, change 'Lax' accordingly
+        setcookie($this->cookieName, '', [
+
+            'expires'  => time() - 3600,
+            'path'     => '/',
+            'secure'   => !empty($_SERVER['HTTPS']),
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
     }
 }

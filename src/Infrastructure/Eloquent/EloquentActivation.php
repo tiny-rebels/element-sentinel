@@ -23,16 +23,14 @@ class EloquentActivation extends Model implements ActivationInterface {
         'user_id',
         'code',
         'completed',
-        'completed_at',
-        'created_at',
+        'completed_at'
     ];
 
     /** @var string[] */
     protected $casts = [
 
         'completed'     => 'boolean',
-        'completed_at'  => 'datetime',
-        'created_at'    => 'datetime',
+        'completed_at'  => 'datetime'
     ];
 
     /** @return int|string */

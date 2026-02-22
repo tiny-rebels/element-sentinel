@@ -75,14 +75,12 @@ final class NormalizeConfig {
 
                 // Optional remember section, e.g. auth.remember.lifetime_seconds
                 $remember     = isset($auth['remember']) && is_array($auth['remember']) ? $auth['remember'] : [];
-                $lifetimeSecs = isset($remember['lifetime_seconds'])
-                    ? (int) $remember['lifetime_seconds']
-                    : (60 * 60 * 24 * 30); // 30 days default
+                $lifetimeSecs = isset($remember['lifetime_seconds']) ? (int) $remember['lifetime_seconds'] : (60 * 60 * 24 * 30); // 30 days default
 
                 $cookiePath   = isset($remember['path']) ? (string) $remember['path'] : '/';
                 $cookieDomain = isset($remember['domain']) ? (string) $remember['domain'] : null;
                 $cookieSecure = array_key_exists('secure', $remember) ? (bool) $remember['secure'] : null;
-                $cookieHttp   = array_key_exists('http_only', $remember) ? (bool) $remember['http_only'] : true;
+                $cookieHttp   = !array_key_exists('http_only', $remember) || (bool)$remember['http_only'];
                 $cookieSame   = isset($remember['same_site']) ? (string) $remember['same_site'] : 'Lax';
 
                 // Build persistences repository
@@ -114,11 +112,11 @@ final class NormalizeConfig {
         }
 
         // 2) Hasher
-        $hasherRaw      = isset($auth['hasher']) ? $auth['hasher'] : 'native';
+        $hasherRaw      = $auth['hasher'] ?? 'native';
         $passwordHasher = self::buildHasher($hasherRaw);
 
         // 3) Logger (optional)
-        $loggerInstance = self::buildLogger(isset($auth['logger']) ? $auth['logger'] : null);
+        $loggerInstance = self::buildLogger($auth['logger'] ?? null);
 
         // 4) Build AuthManager service (email-only). Logger is optional and not part of the interface.
         $authManager = new AuthManager(

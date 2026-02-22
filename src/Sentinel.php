@@ -101,7 +101,7 @@ final class Sentinel {
         $credentialsRepository = $canonical['repositories']['credentials'];
         $persistenceRepository = $canonical['repositories']['persistences'];
         $passwordHasher        = $canonical['hasher'];
-        $loggerInstance        = isset($canonical['logger']) ? $canonical['logger'] : null;
+        $loggerInstance        = $canonical['logger'] ?? null;
 
         $instance = new self(
             $userRepository,
@@ -113,7 +113,7 @@ final class Sentinel {
         );
 
         // Bind the AuthManager service built by NormalizeConfig
-        $instance->authManager = isset($canonical['services']['auth']) ? $canonical['services']['auth'] : null;
+        $instance->authManager = $canonical['services']['auth'] ?? null;
 
         self::$instance = $instance;
 
@@ -175,6 +175,16 @@ final class Sentinel {
     public function logger(): ?LoggerInterface {
 
         return $this->logger;
+    }
+
+    /**
+     * Sentinel::check() returns the authenticated user or null.
+     *
+     * @return UserInterface|null
+     */
+    public static function check(): ?UserInterface {
+
+        return self::instance()->userRepository->check();
     }
 
     /**
