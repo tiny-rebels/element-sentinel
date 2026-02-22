@@ -1,0 +1,47 @@
+{
+    "name": "element/sentinel",
+    "description": "Sentinel is a PHP 7.4+ framework agnostic fully-featured authentication & authorization system. It also provides additional features such as user roles and additional security features.",
+    "keywords": ["Element core", "SMS", "Messages", "Slack", "Notifications"],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Stefan Korfitz",
+            "homepage": "https://www.korfitz.com",
+            "role": "Developer"
+        }
+    ],
+    "support": {
+        "email": "stefan@korfitz.com"
+    },
+    "config": {
+        "platform": {
+            "php": "7.4"
+        },
+        "sort-packages": true
+    },
+    "suggest": {
+        "illuminate/database": "Required if you want to use the Eloquent repository adapter",
+        "php8": "This package utilizes features that are found in 7.4 - But if you use php8 or higher, then you should have no problems"
+    },
+    "autoload": {
+        "psr-4": {
+            "Element\\Sentinel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Element\\Sentinel\\tests\\": "tests/"
+        }
+    },
+    "require": {
+        "php": ">=7.2",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "monolog/monolog": "^2.11",
+        "psr/log": "^1.1 || ^2.0 || ^3.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.6"
+    }
+}
