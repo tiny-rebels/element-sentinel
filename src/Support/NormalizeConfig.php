@@ -7,103 +7,214 @@ use Element\Sentinel\Contracts\PasswordHasherInterface;
 use Element\Sentinel\Infrastructure\Eloquent\{
     EloquentActivationRepository,
     EloquentCredentialsRepository,
+    EloquentPermission,
+    EloquentPermissionRepository,
     EloquentPersistenceRepository,
+    EloquentRole,
+    EloquentRoleRepository,
+    EloquentThrottleRepository,
     EloquentUser,
     EloquentUserRepository
 };
 
-use Element\Sentinel\Services\AuthManager;
+use Element\Sentinel\Infrastructure\Policies\ThrottlePolicy;
 
-use Element\Sentinel\Support\NativePasswordHasher;
-
-use Psr\Log\{
-    LoggerInterface,
-    NullLogger
+use Element\Sentinel\Services\{
+    AuthManager,
+    LogManager,
+    PermissionManager,
+    RoleManager
 };
+
+use Element\Sentinel\Services\Security\ThrottleCheckpoint;
 
 /**
  * NormalizeConfig
  *
- * Turns various user-friendly configuration inputs into the canonical
- * deploy array expected by Sentinel::deploy().
- *
- * Supported inputs:
- *  - ['file' => '/path/auth.php']          // PHP file returning array
- *  - ['file' => '/path/auth.yaml']         // YAML file (requires symfony/yaml)
- *  - ['auth' => [...]]                     // "auth-style" array like your YAML
- *  - ['adapter' => 'eloquent', ...]        // direct symbolic options
- *  - canonical deploy array (repositories/hasher[, logger])
- *
- * Canonical repositories:
- *  'repositories' => [
- *      'users'        => UserRepositoryInterface,
- *      'activations'  => ActivationRepositoryInterface,
- *      'credentials'  => CredentialsRepositoryInterface,
- *      'persistences' => PersistenceRepositoryInterface,
- *  ]
- *
- * Services:
- *  'services' => [
- *      'auth' => AuthManager
- *  ]
+ * Transforms user-facing configuration into the canonical array structure
+ * required by Sentinel::deploy().
  */
 final class NormalizeConfig {
 
     /**
      * Normalize any supported input into the canonical deploy array.
      *
-     * @param array $inputConfig
+     * @param array $inputConfiguration
      *
      * @return array
      */
-    public static function normalize(array $inputConfig): array {
+    public static function normalize(array $inputConfiguration): array {
 
-        $rawConfig = self::extractArray($inputConfig);
+        $rawConfiguration = self::extractArray($inputConfiguration);
 
-        // Accept either a top-level "auth" section or direct canonical/symbolic keys
-        $auth = isset($rawConfig['auth']) && is_array($rawConfig['auth']) ? $rawConfig['auth'] : $rawConfig;
+        // Preferred top-level section is "sentinel".
+        // Backward compatibility: fall back to "auth" or to root array.
+        $configuration = (isset($rawConfiguration['sentinel']) && is_array($rawConfiguration['sentinel']))
+            ? $rawConfiguration['sentinel']
+            : ((isset($rawConfiguration['auth']) && is_array($rawConfiguration['auth'])) ? $rawConfiguration['auth'] : $rawConfiguration);
 
-        // 1) Adapter -> repositories (currently supporting 'eloquent')
-        $adapterName = isset($auth['adapter']) ? strtolower((string) $auth['adapter']) : 'eloquent';
+        /*
+         * 1) Adapter → repositories
+         */
+        $adapterName = isset($configuration['adapter']) ? strtolower((string) $configuration['adapter']) : 'eloquent';
 
         switch ($adapterName) {
 
             case 'eloquent':
 
-                // Remember-me and cookie settings
-                $cookieName   = isset($auth['cookie']) ? (string) $auth['cookie'] : 'element_sentinel';
+                /*
+                 * Remember‑me cookie configuration
+                 */
+                $cookieName = isset($configuration['cookie']) ? (string) $configuration['cookie'] : 'element_sentinel';
 
-                // Optional remember section, e.g. auth.remember.lifetime_seconds
-                $remember     = isset($auth['remember']) && is_array($auth['remember']) ? $auth['remember'] : [];
-                $lifetimeSecs = isset($remember['lifetime_seconds']) ? (int) $remember['lifetime_seconds'] : (60 * 60 * 24 * 30); // 30 days default
+                $rememberSection = (isset($configuration['remember']) && is_array($configuration['remember']))
+                    ? $configuration['remember']
+                    : [];
 
-                $cookiePath   = isset($remember['path']) ? (string) $remember['path'] : '/';
-                $cookieDomain = isset($remember['domain']) ? (string) $remember['domain'] : null;
-                $cookieSecure = array_key_exists('secure', $remember) ? (bool) $remember['secure'] : null;
-                $cookieHttp   = !array_key_exists('http_only', $remember) || (bool)$remember['http_only'];
-                $cookieSame   = isset($remember['same_site']) ? (string) $remember['same_site'] : 'Lax';
+                $lifetimeSeconds = isset($rememberSection['lifetime_seconds']) ? (int) $rememberSection['lifetime_seconds'] : (60 * 60 * 24 * 30);
+                $cookiePath      = isset($rememberSection['path'])      ? (string) $rememberSection['path']      : '/';
+                $cookieDomain    = isset($rememberSection['domain'])    ? (string) $rememberSection['domain']    : null;
+                $cookieSecure    = array_key_exists('secure', $rememberSection) ? (bool) $rememberSection['secure'] : null;
+                $cookieHttpOnly  = !array_key_exists('http_only', $rememberSection) || (bool) $rememberSection['http_only'];
+                $cookieSameSite  = isset($rememberSection['same_site']) ? (string) $rememberSection['same_site'] : 'Lax';
 
-                // Build persistences repository
+                /*
+                 * User model (pluggable) — NO relations from YAML
+                 */
+                $userModelClass = (isset($configuration['models']['users']['class']) && is_string($configuration['models']['users']['class']))
+                    ? $configuration['models']['users']['class']
+                    : EloquentUser::class;
+
+                Validator::validateUserModel($userModelClass);
+
+                // No YAML relations → empty by design
+                $defaultEagerRelations = [];
+
+                // Allow runtime withRelations only for the standard EloquentUser
+                $honorRuntimeRelations = ($userModelClass === EloquentUser::class);
+
+                /*
+                 * Persistence repository (remember‑me)
+                 */
                 $persistencesRepository = new EloquentPersistenceRepository(
                     $cookieName,
-                    $lifetimeSecs,
+                    (int) $lifetimeSeconds,
                     $cookiePath,
                     $cookieDomain,
                     $cookieSecure,
-                    $cookieHttp,
-                    $cookieSame
+                    $cookieHttpOnly,
+                    $cookieSameSite
                 );
 
-                // Users repository (inject persistences so check() can hydrate from remember cookie)
-                $usersRepository       = new EloquentUserRepository($persistencesRepository);
+                /*
+                 * Users repository
+                 */
+                $usersRepository = new EloquentUserRepository(
+                    $userModelClass,
+                    $persistencesRepository,
+                    $defaultEagerRelations,
+                    $honorRuntimeRelations
+                );
 
-                // Activations
+                /*
+                 * Activations
+                 */
                 $activationsRepository = new EloquentActivationRepository();
 
-                // Email-only credentials repository
-                $credentialsRepository = new EloquentCredentialsRepository(
-                    EloquentUser::class
+                /*
+                 * Credentials (email‑only, pluggable model)
+                 */
+                $credentialsRepository = new EloquentCredentialsRepository($userModelClass, []);
+
+                /*
+                 * Roles (pluggable)
+                 */
+                $rolesConfiguration = (isset($configuration['models']['roles']) && is_array($configuration['models']['roles']))
+                    ? $configuration['models']['roles']
+                    : [];
+
+                $roleModelClass = (isset($rolesConfiguration['class']) && is_string($rolesConfiguration['class']))
+                    ? $rolesConfiguration['class']
+                    : EloquentRole::class;
+
+                Validator::validateRoleModel($roleModelClass);
+
+                $rolePivotTable = isset($rolesConfiguration['pivot'])    ? (string) $rolesConfiguration['pivot']    : 'role_user';
+                $roleUserKey    = isset($rolesConfiguration['user_key']) ? (string) $rolesConfiguration['user_key'] : 'user_id';
+                $roleRoleKey    = isset($rolesConfiguration['role_key']) ? (string) $rolesConfiguration['role_key'] : 'role_id';
+
+                $rolesRepository = new EloquentRoleRepository(
+                    $roleModelClass,
+                    $userModelClass,
+                    $rolePivotTable,
+                    $roleUserKey,
+                    $roleRoleKey
                 );
+
+                $automaticallyCreateMissingRoles = !isset($configuration['roles']['auto_create']) || (bool)$configuration['roles']['auto_create'];
+
+                /*
+                 * Permissions (pluggable) — user-based column "user" (hasMany) + role pivot (permission_role)
+                 */
+                $permissionsConfiguration = (isset($configuration['models']['permissions']) && is_array($configuration['models']['permissions'])) ? $configuration['models']['permissions'] : [];
+
+                $permissionModelClass = (isset($permissionsConfiguration['class']) && is_string($permissionsConfiguration['class'])) ? $permissionsConfiguration['class'] : EloquentPermission::class;
+
+                Validator::validatePermissionModel($permissionModelClass);
+
+                $permissionRolePivotTable = isset($permissionsConfiguration['role_pivot'])      ? (string) $permissionsConfiguration['role_pivot']      : 'permission_role';
+                $roleUserPivotTable       = isset($rolesConfiguration['pivot'])                 ? (string) $rolesConfiguration['pivot']                 : 'role_user';
+                $permissionUserForeignKey = isset($permissionsConfiguration['user_key'])        ? (string) $permissionsConfiguration['user_key']        : 'user';
+                $permissionRoleForeignKey = isset($permissionsConfiguration['role_key'])        ? (string) $permissionsConfiguration['role_key']        : 'role_id';
+                $permissionForeignKey     = isset($permissionsConfiguration['permission_key'])  ? (string) $permissionsConfiguration['permission_key']  : 'permission_id';
+
+                $permissionsRepository = new EloquentPermissionRepository(
+                    $permissionModelClass,
+                    $userModelClass,
+                    $permissionRolePivotTable,
+                    $roleUserPivotTable,
+                    $permissionUserForeignKey,
+                    $permissionRoleForeignKey,
+                    $permissionForeignKey
+                );
+
+                $automaticallyCreateMissingPermissions = !isset($configuration['permissions']['auto_create']) || (bool)$configuration['permissions']['auto_create'];
+
+                /*
+                 * Throttling (global/ip/user) via Infrastructure/Policies\ThrottlePolicy
+                 * YAML example expected under: sentinel.throttling
+                 */
+                $throttlingConfig = isset($configuration['throttling']) && is_array($configuration['throttling']) ? $configuration['throttling'] : [];
+
+                // Helper to build a ThrottlePolicy per scope
+                $buildPolicy = function (array $cfg, string $scope, int $defaultInterval, $defaultThresholds, int $defaultSuspensionSeconds) {
+                    $scopeCfg   = isset($cfg[$scope]) && is_array($cfg[$scope]) ? $cfg[$scope] : [];
+                    $interval   = isset($scopeCfg['interval']) ? (int) $scopeCfg['interval'] : $defaultInterval;
+                    $thresholds = $scopeCfg['thresholds'] ?? $defaultThresholds;
+
+                    // If you later add "suspension_seconds" per scope in YAML:
+                    // $suspension = isset($scopeCfg['suspension_seconds']) ? (int) $scopeCfg['suspension_seconds'] : $defaultSuspensionSeconds;
+                    $suspension = $defaultSuspensionSeconds;
+
+                    return new ThrottlePolicy($interval, $thresholds, $suspension);
+                };
+
+                // Your YAML: global has a map (attempts => minutes), ip/user are integers.
+                $globalPolicy = $buildPolicy($throttlingConfig, 'global', 900, [], 60);
+                $ipPolicy     = $buildPolicy($throttlingConfig, 'ip',     900, 5,  60);
+                $userPolicy   = $buildPolicy($throttlingConfig, 'user',   900, 5,  60);
+
+                $throttleRepository = new EloquentThrottleRepository(
+                    'throttle_entries',
+                    $globalPolicy,
+                    $ipPolicy,
+                    $userPolicy
+                );
+
+                // Optionally allow disabling checkpoint via config later; keep it enabled for now.
+                $throttleEnabled    = true;
+
+                $throttleCheckpoint = new ThrottleCheckpoint($throttleRepository, $throttleEnabled);
 
                 break;
 
@@ -111,14 +222,34 @@ final class NormalizeConfig {
                 throw new \InvalidArgumentException('Unsupported adapter: ' . $adapterName);
         }
 
-        // 2) Hasher
-        $hasherRaw      = $auth['hasher'] ?? 'native';
-        $passwordHasher = self::buildHasher($hasherRaw);
+        /*
+         * 2) Hasher
+         */
+        $hasherRaw      = $configuration['hasher'] ?? 'native';
+        $passwordHasher = NativePasswordHasher::resolveHasher($hasherRaw);
 
-        // 3) Logger (optional)
-        $loggerInstance = self::buildLogger($auth['logger'] ?? null);
+        /*
+         * 3) Logger (optional) – built via LogManager
+         */
+        $loggerInstance = LogManager::build($configuration['logger'] ?? null);
 
-        // 4) Build AuthManager service (email-only). Logger is optional and not part of the interface.
+        /*
+         * 4) Services
+         */
+        $roleManager = new RoleManager(
+            $rolesRepository,
+            $loggerInstance,
+            $automaticallyCreateMissingRoles
+        );
+
+        // PermissionManager is ALWAYS combined; boolean sets auto-create
+        $permissionManager = new PermissionManager(
+            $permissionsRepository,
+            $rolesRepository,
+            $loggerInstance,
+            $automaticallyCreateMissingPermissions
+        );
+
         $authManager = new AuthManager(
             $usersRepository,
             $activationsRepository,
@@ -128,27 +259,31 @@ final class NormalizeConfig {
             $loggerInstance
         );
 
-        // 5) Canonical shape (repositories + hasher + optional logger + services.auth)
+        /*
+         * 5) Canonical structure (repositories + hasher + optional logger + services)
+         */
         $canonical = [
-
             'repositories' => [
-
                 'users'        => $usersRepository,
                 'activations'  => $activationsRepository,
                 'credentials'  => $credentialsRepository,
                 'persistences' => $persistencesRepository,
+                'roles'        => $rolesRepository,
+                'permissions'  => $permissionsRepository,
+                'throttle'     => $throttleRepository,
             ],
-
-            'hasher'   => $passwordHasher,
-
+            'hasher' => $passwordHasher,
             'services' => [
-
-                'auth' => $authManager,
+                'auth'        => $authManager,
+                'roles'       => $roleManager,
+                'permissions' => $permissionManager,
+                'security'    => [
+                    'throttle' => $throttleCheckpoint,
+                ],
             ],
         ];
 
         if ($loggerInstance !== null) {
-
             $canonical['logger'] = $loggerInstance;
         }
 
@@ -156,26 +291,17 @@ final class NormalizeConfig {
     }
 
     /**
-     * Extract a PHP array from supported sources.
-     *
-     * Rules:
-     *  - If ['file' => '/path/...'] is present, parse that file.
-     *    * .php  must return an array.
-     *    * .yml/.yaml requires symfony/yaml.
-     *  - Otherwise, the input itself is considered the array config.
+     * Extract array from PHP/YAML configuration.
      *
      * @param array $input
      *
      * @return array
-     *
-     * @throws \InvalidArgumentException
-     * @throws \RuntimeException
      */
     private static function extractArray(array $input): array {
 
         if (!isset($input['file'])) {
 
-            return $input; // Already an array payload
+            return $input;
         }
 
         $path = (string) $input['file'];
@@ -189,7 +315,6 @@ final class NormalizeConfig {
 
         if ($extension === 'php') {
 
-            /** @var mixed $data */
             $data = require $path;
 
             if (!is_array($data)) {
@@ -204,247 +329,19 @@ final class NormalizeConfig {
 
             if (!class_exists(\Symfony\Component\Yaml\Yaml::class)) {
 
-                throw new \RuntimeException(
-                    'YAML config requires symfony/yaml. Install it or convert your YAML to a PHP array file.'
-                );
+                throw new \RuntimeException('YAML requires symfony/yaml. Install it or use PHP config.');
             }
 
-            /** @var mixed $parsed */
             $parsed = \Symfony\Component\Yaml\Yaml::parseFile($path);
 
             if (!is_array($parsed)) {
 
-                throw new \InvalidArgumentException('YAML config must parse to an array: ' . $path);
+                throw new \InvalidArgumentException('YAML config must return an array: ' . $path);
             }
 
             return $parsed;
         }
 
-        throw new \InvalidArgumentException('Unsupported config file extension: ' . $extension);
-    }
-
-    /**
-     * Build a PasswordHasherInterface from a symbolic value or an instance.
-     *
-     * @param mixed $hasherRaw
-     *
-     * @return PasswordHasherInterface
-     *
-     * @throws \InvalidArgumentException
-     */
-    private static function buildHasher($hasherRaw): PasswordHasherInterface {
-
-        if ($hasherRaw instanceof PasswordHasherInterface) {
-
-            return $hasherRaw;
-        }
-
-        if ($hasherRaw === 'native' || $hasherRaw === null) {
-
-            return new NativePasswordHasher();
-        }
-
-        throw new \InvalidArgumentException('Unsupported hasher value. Use "native" or provide an instance.');
-    }
-
-    /**
-     * Build a logger instance from symbolic config, an instance, or a factory.
-     *
-     * Accepted inputs:
-     *  - LoggerInterface instance (returned as-is)
-     *  - callable returning LoggerInterface
-     *  - string "monolog"      -> build a default Monolog logger
-     *  - string "null"/"none"  -> NullLogger
-     *  - array with keys:
-     *      driver:      "monolog" (required for array form)
-     *      channel:     string                       (default: "sentinel")
-     *      path:        string (file path)           (default: "<base>/logs/sentinel.log")
-     *      level:       string level name            (default: "debug")
-     *      bubble:      bool                         (optional)
-     *      permission:  int (octal like 0775)        (optional)
-     *      format:      string Monolog line format   (optional)
-     *      date_format: string date format           (optional)
-     *
-     * @param mixed $loggerRaw
-     *
-     * @return LoggerInterface|null
-     *
-     * @throws \InvalidArgumentException
-     * @throws \RuntimeException
-     */
-    private static function buildLogger($loggerRaw): ?LoggerInterface {
-
-        if ($loggerRaw === null) {
-
-            return null;
-        }
-
-        if (is_callable($loggerRaw)) {
-
-            $loggerRaw = $loggerRaw();
-        }
-
-        if ($loggerRaw instanceof LoggerInterface) {
-
-            return $loggerRaw;
-        }
-
-        if (is_string($loggerRaw)) {
-
-            $symbol = strtolower($loggerRaw);
-
-            if ($symbol === 'null' || $symbol === 'none') {
-
-                return new NullLogger();
-            }
-
-            if ($symbol === 'monolog') {
-
-                return self::buildDefaultMonolog();
-            }
-
-            throw new \InvalidArgumentException('Unsupported logger string: ' . $loggerRaw);
-        }
-
-        if (is_array($loggerRaw)) {
-
-            $driver = isset($loggerRaw['driver']) ? strtolower((string) $loggerRaw['driver']) : '';
-
-            if ($driver !== 'monolog') {
-
-                throw new \InvalidArgumentException('Unsupported logger driver in array config: ' . $driver);
-            }
-
-            return self::buildMonologFromArray($loggerRaw);
-        }
-
-        throw new \InvalidArgumentException(
-            'logger must be LoggerInterface, callable, "monolog", "null"/"none", or an array.'
-        );
-    }
-
-    /**
-     * Create a default Monolog logger writing to "<base>/logs/sentinel.log" @ DEBUG.
-     *
-     * @return LoggerInterface
-     */
-    private static function buildDefaultMonolog(): LoggerInterface {
-
-        self::assertMonologAvailable();
-
-        $baseDir = self::detectBaseDir();
-        $logsDir = $baseDir . DIRECTORY_SEPARATOR . 'logs';
-
-        if (!is_dir($logsDir)) {
-
-            @mkdir($logsDir, 0775, true);
-        }
-
-        $filePath = $logsDir . DIRECTORY_SEPARATOR . 'sentinel.log';
-
-        $logger = new \Monolog\Logger('sentinel');
-        $handler = new \Monolog\Handler\StreamHandler($filePath, \Monolog\Logger::DEBUG);
-
-        $formatter = new \Monolog\Formatter\LineFormatter(
-            "[%datetime%] %channel%.%level_name%: %message% %context% %extra%\n",
-            'c',
-            true,
-            true
-        );
-        $handler->setFormatter($formatter);
-
-        $logger->pushHandler($handler);
-
-        return $logger;
-    }
-
-    /**
-     * Create a Monolog logger from array config.
-     *
-     * @param array $config
-     *
-     * @return LoggerInterface
-     */
-    private static function buildMonologFromArray(array $config): LoggerInterface {
-
-        self::assertMonologAvailable();
-
-        $channelName = isset($config['channel']) ? (string) $config['channel'] : 'sentinel';
-
-        $baseDir = self::detectBaseDir();
-
-        // Allow %BASE_DIR% placeholder in path
-        $rawPath = isset($config['path']) ? (string) $config['path'] : ($baseDir . '/logs/sentinel.log');
-        $logPath = str_replace('%BASE_DIR%', $baseDir, $rawPath);
-
-        // Ensure directory exists
-        $logDir = dirname($logPath);
-
-        if (!is_dir($logDir)) {
-            $permission = isset($config['permission']) ? (int) $config['permission'] : 0775;
-            @mkdir($logDir, $permission, true);
-        }
-
-        $levelName = isset($config['level']) ? strtolower((string) $config['level']) : 'debug';
-
-        $levelMap = [
-
-            'emergency' => \Monolog\Logger::EMERGENCY,
-            'alert'     => \Monolog\Logger::ALERT,
-            'critical'  => \Monolog\Logger::CRITICAL,
-            'error'     => \Monolog\Logger::ERROR,
-            'warning'   => \Monolog\Logger::WARNING,
-            'notice'    => \Monolog\Logger::NOTICE,
-            'info'      => \Monolog\Logger::INFO,
-            'debug'     => \Monolog\Logger::DEBUG,
-        ];
-
-        $level      = isset($levelMap[$levelName]) ? $levelMap[$levelName] : \Monolog\Logger::DEBUG;
-        $bubble     = isset($config['bubble']) ? (bool) $config['bubble'] : true;
-
-        $logger     = new \Monolog\Logger($channelName);
-        $handler    = new \Monolog\Handler\StreamHandler($logPath, $level, $bubble);
-
-        // Optional formatter
-        $format     = isset($config['format']) ? (string) $config['format'] : "[%datetime%] %channel%.%level_name%: %message% %context% %extra%\n";
-        $dateFormat = isset($config['date_format']) ? (string) $config['date_format'] : 'c';
-
-        $formatter  = new \Monolog\Formatter\LineFormatter($format, $dateFormat, true, true);
-
-        $handler->setFormatter($formatter);
-
-        $logger->pushHandler($handler);
-
-        return $logger;
-    }
-
-    /**
-     * Detect a reasonable base directory for default paths.
-     *
-     * @return string
-     */
-    private static function detectBaseDir(): string {
-
-        // Detect package root (…/vendor/element/sentinel) and go up to project root when possible.
-        $root = dirname(__DIR__, 3);
-
-        return is_dir($root) ? $root : getcwd();
-    }
-
-    /**
-     * Ensure Monolog is installed before building it.
-     *
-     * @return void
-     *
-     * @throws \RuntimeException
-     */
-    private static function assertMonologAvailable(): void {
-
-        if (!class_exists(\Monolog\Logger::class) || !class_exists(\Monolog\Handler\StreamHandler::class)) {
-
-            throw new \RuntimeException(
-                'Monolog is required for logger "monolog". Run: composer require monolog/monolog'
-            );
-        }
+        throw new \InvalidArgumentException('Unsupported config extension: ' . $extension);
     }
 }

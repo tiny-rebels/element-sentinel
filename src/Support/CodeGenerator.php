@@ -89,6 +89,6 @@ class CodeGenerator {
      *
      * Keep in mind:
      * - Use URL-encoding when placing codes in query parameters.
-     * - Ensure your database column length (e.g., CHAR(64)) matches the code length you generate.
+     * - Ensure your schemas column length (e.g., CHAR(64)) matches the code length you generate.
      */
 }

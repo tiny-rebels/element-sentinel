@@ -2,15 +2,15 @@
 
 namespace Element\Sentinel;
 
-use Element\Sentinel\Contracts\{
-    ActivationRepositoryInterface,
+use Element\Sentinel\Contracts\{ActivationRepositoryInterface,
     CredentialsRepositoryInterface,
     PasswordHasherInterface,
+    PermissionRepositoryInterface,
     PersistenceRepositoryInterface,
+    RoleRepositoryInterface,
     UserInterface,
     UserRepositoryInterface,
-    AuthManagerInterface
-};
+    AuthManagerInterface};
 
 use Element\Sentinel\Support\NormalizeConfig;
 
@@ -28,23 +28,31 @@ use Psr\Log\LoggerInterface;
  */
 final class Sentinel {
 
+    /** @var ActivationRepositoryInterface */
+    private $activationRepository;
+
+    /** @var CredentialsRepositoryInterface */
+    private $credentialsRepository;
+
+    /** @var PermissionRepositoryInterface */
+    private $permissionRepository;
+
+    /** @var PersistenceRepositoryInterface */
+    private $persistenceRepository;
+
+    /** @var RoleRepositoryInterface */
+    private $roleRepository;
+
     /** @var UserRepositoryInterface */
     private $userRepository;
 
-    /** @var ActivationRepositoryInterface */
-    private $activationRepository;
+
 
     /** @var PasswordHasherInterface */
     private $passwordHasher;
 
     /** @var LoggerInterface|null */
     private $logger;
-
-    /** @var CredentialsRepositoryInterface|null */
-    private $credentialsRepository;
-
-    /** @var PersistenceRepositoryInterface|null */
-    private $persistenceRepository;
 
     /** @var AuthManagerInterface|null */
     private $authManager;
@@ -55,33 +63,42 @@ final class Sentinel {
     /**
      * Construct a Sentinel facade instance with concrete dependencies.
      *
-     * @param UserRepositoryInterface             $userRepository
+     * @param ActivationRepositoryInterface     $activationRepository
      *
-     * @param ActivationRepositoryInterface       $activationRepository
+     * @param CredentialsRepositoryInterface    $credentialsRepository
      *
-     * @param PasswordHasherInterface             $passwordHasher
+     * @param PermissionRepositoryInterface     $permissionRepository
      *
-     * @param LoggerInterface|null                $logger
+     * @param PersistenceRepositoryInterface    $persistenceRepository
      *
-     * @param CredentialsRepositoryInterface|null $credentialsRepository
+     * @param RoleRepositoryInterface           $roleRepository
      *
-     * @param PersistenceRepositoryInterface|null $persistenceRepository
+     * @param UserRepositoryInterface           $userRepository
+     *
+     * @param PasswordHasherInterface           $passwordHasher
+     *
+     * @param LoggerInterface                   $logger
      */
     public function __construct(
-        UserRepositoryInterface $userRepository,
+
         ActivationRepositoryInterface $activationRepository,
+        CredentialsRepositoryInterface $credentialsRepository,
+        PermissionRepositoryInterface $permissionRepository,
+        PersistenceRepositoryInterface $persistenceRepository,
+        RoleRepositoryInterface $roleRepository,
+        UserRepositoryInterface $userRepository,
         PasswordHasherInterface $passwordHasher,
-        LoggerInterface $logger = null,
-        CredentialsRepositoryInterface $credentialsRepository = null,
-        PersistenceRepositoryInterface $persistenceRepository = null
-    ) {
-        $this->userRepository        = $userRepository;
-        $this->activationRepository  = $activationRepository;
-        $this->passwordHasher        = $passwordHasher;
-        $this->logger                = $logger;
-        $this->credentialsRepository = $credentialsRepository;
-        $this->persistenceRepository = $persistenceRepository;
-        $this->authManager           = null; // bound during deploy()
+        LoggerInterface $logger) {
+
+        $this->activationRepository     = $activationRepository;
+        $this->credentialsRepository    = $credentialsRepository;
+        $this->permissionRepository     = $permissionRepository;
+        $this->persistenceRepository    = $persistenceRepository;
+        $this->roleRepository           = $roleRepository;
+        $this->userRepository           = $userRepository;
+        $this->passwordHasher           = $passwordHasher;
+        $this->logger                   = $logger;
+        $this->authManager              = null; // bound during deploy()
     }
 
     /**
@@ -96,20 +113,24 @@ final class Sentinel {
 
         $canonical = NormalizeConfig::normalize($config);
 
-        $userRepository        = $canonical['repositories']['users'];
         $activationRepository  = $canonical['repositories']['activations'];
         $credentialsRepository = $canonical['repositories']['credentials'];
+        $permissionRepository  = $canonical['repositories']['permissions'];
         $persistenceRepository = $canonical['repositories']['persistences'];
+        $roleRepository        = $canonical['repositories']['roles'];
+        $userRepository        = $canonical['repositories']['users'];
         $passwordHasher        = $canonical['hasher'];
         $loggerInstance        = $canonical['logger'] ?? null;
 
         $instance = new self(
-            $userRepository,
             $activationRepository,
-            $passwordHasher,
-            $loggerInstance,
             $credentialsRepository,
-            $persistenceRepository
+            $permissionRepository,
+            $persistenceRepository,
+            $roleRepository,
+            $userRepository,
+            $passwordHasher,
+            $loggerInstance
         );
 
         // Bind the AuthManager service built by NormalizeConfig
@@ -138,16 +159,6 @@ final class Sentinel {
     }
 
     /**
-     * Repository shortcut: users().
-     *
-     * @return UserRepositoryInterface
-     */
-    public static function users(): UserRepositoryInterface {
-
-        return self::instance()->userRepository;
-    }
-
-    /**
      * Repository shortcut: activations().
      *
      * @return ActivationRepositoryInterface
@@ -155,6 +166,46 @@ final class Sentinel {
     public static function activations(): ActivationRepositoryInterface {
 
         return self::instance()->activationRepository;
+    }
+
+    /**
+     * Repository shortcut: permissions().
+     *
+     * @return PermissionRepositoryInterface
+     */
+    public static function permissions(): PermissionRepositoryInterface {
+
+        return self::instance()->permissionRepository;
+    }
+
+    /**
+     * Repository shortcut: roles().
+     *
+     * @return RoleRepositoryInterface
+     */
+    public static function roles(): RoleRepositoryInterface {
+
+        return self::instance()->roleRepository;
+    }
+
+    /**
+     * Repository shortcut: users().
+     *
+     * @return UserRepositoryInterface
+     */
+    public static function user(): UserRepositoryInterface {
+
+        return self::instance()->userRepository;
+    }
+
+    public static function users(): UserRepositoryInterface {
+
+        return self::instance()->userRepository;
+    }
+
+    public static function auth(): UserRepositoryInterface {
+
+        return self::instance()->userRepository;
     }
 
     /**
@@ -180,11 +231,13 @@ final class Sentinel {
     /**
      * Sentinel::check() returns the authenticated user or null.
      *
+     * @param array $withRelations
+     *
      * @return UserInterface|null
      */
-    public static function check(): ?UserInterface {
+    public static function check(array $withRelations = []): ?UserInterface {
 
-        return self::instance()->userRepository->check();
+        return self::instance()->userRepository->check($withRelations);
     }
 
     /**

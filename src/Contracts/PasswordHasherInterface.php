@@ -9,7 +9,7 @@ interface PasswordHasherInterface {
      *
      * @return string
      */
-    public function hash($password);
+    public function hash(string $password): string;
 
     /**
      * @param string $password
@@ -17,13 +17,13 @@ interface PasswordHasherInterface {
      *
      * @return bool
      */
-    public function verify($password, $hash);
+    public function verify(string $password, string $hash): bool;
 
     /**
      * @param string $hash
      *
      * @return bool
      */
-    public function needsRehash($hash);
+    public function needsRehash(string $hash): bool;
 
 }

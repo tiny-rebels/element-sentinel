@@ -5,7 +5,7 @@ namespace Element\Sentinel\Contracts;
 interface CredentialsRepositoryInterface {
 
     /**
-     * Find a user (email/username/etc.) by a single login value.
+     * Find a user by email.
      *
      * @param string $login
      *

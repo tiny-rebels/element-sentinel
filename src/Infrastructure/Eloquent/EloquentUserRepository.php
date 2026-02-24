@@ -3,49 +3,148 @@
 namespace Element\Sentinel\Infrastructure\Eloquent;
 
 use Element\Sentinel\Contracts\{
+    PersistenceRepositoryInterface,
     UserInterface,
-    UserRepositoryInterface,
-    PersistenceRepositoryInterface
+    UserRepositoryInterface
 };
+
+use Element\Sentinel\Services\Exceptions\Auth\RelationsNotSupportedException;
 
 /**
  * EloquentUserRepository
  *
- * Eloquent repository implementation for User records.
- * Provides generic responsibilities: findById, save, and check (session/remember-me).
+ * Repository responsible for loading user entities from the configured
+ * Eloquent model class. Supports:
+ *
+ *  - Session and remember-me lookup in check()
+ *  - Optional runtime eager-loading (ONLY for the standard EloquentUser model)
+ *  - Nested eager-loading such as "permissions.items"
+ *  - Safe relation filtering against actual top-level model methods
+ *  - Strict runtime-relations policy for local user models
  */
 class EloquentUserRepository implements UserRepositoryInterface {
 
+    /** @var string */
+    private $userModelClass;
+
     /** @var PersistenceRepositoryInterface|null */
-    private $persistences;
+    private $persistenceRepository;
+
+    /** @var string[] */
+    private $defaultEagerRelations;
 
     /**
-     * Optionally inject a PersistenceRepository to enable remember-me hydration in check().
+     * When false = runtime withRelations() is forbidden and will throw.
      *
-     * @param PersistenceRepositoryInterface|null $persistences
+     * @var bool
      */
-    public function __construct(PersistenceRepositoryInterface $persistences = null) {
+    private $honorRuntimeRelations;
 
-        $this->persistences = $persistences;
+    /**
+     * @param string                              $userModelClass
+     * @param PersistenceRepositoryInterface|null $persistenceRepository
+     * @param string[]                            $defaultEagerRelations
+     * @param bool                                $honorRuntimeRelations
+     */
+    public function __construct(
+        string $userModelClass,
+        ?PersistenceRepositoryInterface $persistenceRepository = null,
+        array $defaultEagerRelations = [],
+        bool $honorRuntimeRelations = true
+    ) {
+        $this->userModelClass        = $userModelClass;
+        $this->persistenceRepository = $persistenceRepository;
+        $this->defaultEagerRelations = $defaultEagerRelations;
+        $this->honorRuntimeRelations = $honorRuntimeRelations;
     }
 
     /**
-     * Find a user by primary key.
+     * Return the authenticated user, or null.
      *
-     * @param int|string $userId
+     * Behavior:
+     *  - For the standard EloquentUser model, $withRelations MAY contain
+     *    nested relations (ex: "permissions.items").
+     *
+     *  - For any local application user model, $withRelations MUST be empty.
+     *    If not, a RuntimeRelationsNotSupportedException is thrown because
+     *    local models ALWAYS control their own eager-loading.
+     *
+     * @param string[] $withRelations
      *
      * @return UserInterface|null
      */
-    public function findById($userId): ?UserInterface {
+    public function check(array $withRelations = []): ?UserInterface {
 
-        return EloquentUser::query()->find($userId);
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+
+            return null;
+        }
+
+        // Runtime eager-loading is NOT allowed for local models
+        if (!$this->honorRuntimeRelations && !empty($withRelations)) {
+
+            throw new RelationsNotSupportedException(
+                'Runtime eager-loading (withRelations) is not supported for local user models. Local relations must be defined directly on the application model.',
+                1801,
+                null,
+                [
+                    'withRelations' => $withRelations,
+                    'userModelClass' => $this->userModelClass,
+                ]
+            );
+        }
+
+        $sessionUserId = $_SESSION['sentinel_user_id'] ?? null;
+
+        if (!empty($sessionUserId)) {
+
+            return $this->findByIdWith($sessionUserId, $withRelations);
+        }
+
+        if ($this->persistenceRepository) {
+
+            $rememberUserId = $this->persistenceRepository->userIdFromRememberCookie();
+
+            if (!empty($rememberUserId)) {
+
+                $_SESSION['sentinel_user_id'] = $rememberUserId;
+
+                return $this->findByIdWith($rememberUserId, $withRelations);
+            }
+        }
+
+        return null;
     }
 
     /**
-     * Persist a user entity.
+     * Find user by primary key with default eager-relations only.
      *
-     * If the given object is the Eloquent model, save directly.
-     * Otherwise, perform a best-effort update for non-Eloquent models.
+     * @param int|string $userId
+     * @param array $withRelations
+     *
+     * @return UserInterface|null
+     */
+    public function findById($userId, array $withRelations = []): ?UserInterface {
+
+        if (!$this->honorRuntimeRelations && !empty($withRelations)) {
+
+            throw new RelationsNotSupportedException(
+                'Runtime eager-loading (withRelations) is not supported for local user models. Local relations must be defined directly on the application model.',
+                1802,
+                null,
+                [
+                    'withRelations' => $withRelations,
+                    'userModelClass' => $this->userModelClass,
+                ]
+            );
+        }
+
+        return $this->findByIdWith($userId, $withRelations);
+
+    }
+
+    /**
+     * Save a user entity.
      *
      * @param UserInterface $userObject
      *
@@ -53,7 +152,7 @@ class EloquentUserRepository implements UserRepositoryInterface {
      */
     public function save(UserInterface $userObject): void {
 
-        if ($userObject instanceof EloquentUser) {
+        if ($userObject instanceof $this->userModelClass) {
 
             $userObject->save();
 
@@ -64,47 +163,122 @@ class EloquentUserRepository implements UserRepositoryInterface {
     }
 
     /**
-     * Check the current authentication state and return the authenticated user if available.
+     * Internal helper: find user with optional eager-loading.
      *
-     * Behavior:
-     * - If a session id is set, return that user.
-     * - Else, if a remember cookie is present and valid (and a PersistenceRepository is configured),
-     *   hydrate the session and return that user.
+     * Supports nested relations such as "permissions.items".
+     *
+     * @param int|string $userId
+     * @param string[]   $withRelations
      *
      * @return UserInterface|null
      */
-    public function check(): ?UserInterface {
+    private function findByIdWith($userId, array $withRelations): ?UserInterface {
 
-        if (session_status() !== PHP_SESSION_ACTIVE) {
+        /** @var \Illuminate\Database\Eloquent\Model $model */
+        $model = new $this->userModelClass();
 
-            return null;
+        $query = $model->newQuery();
+
+        // Merge default eager relations with runtime ones, but only if allowed
+        $relations = $this->honorRuntimeRelations ? $this->mergeRelations($this->defaultEagerRelations, $withRelations) : $this->defaultEagerRelations;
+
+        // Fail-safe filtering: allow nested relations but check only top-level methods
+        $safeRelations = $this->filterExistingRelations($model, $relations);
+
+        if (!empty($safeRelations)) {
+
+            $query->with($safeRelations);
         }
 
-        $userId = $_SESSION['sentinel_user_id'] ?? null;
+        $found = $query->find($userId);
 
-        if (!empty($userId)) {
-
-            return $this->findById($userId);
-        }
-
-        if ($this->persistences) {
-
-            $rememberUserId = $this->persistences->userIdFromRememberCookie();
-
-            if (!empty($rememberUserId)) {
-
-                $_SESSION['sentinel_user_id'] = $rememberUserId;
-
-                return $this->findById($rememberUserId);
-            }
-        }
-
-        return null;
+        return ($found instanceof UserInterface) ? $found : null;
     }
 
     /**
-     * Update a non-Eloquent user entity in the database.
-     * Only toggles activation flag and updated_at, assuming the record exists.
+     * Filter out relation names that cannot exist on model.
+     *
+     * Allows nested relations such as:
+     *   permissions.items
+     *   permissions.items.children
+     *
+     * Logic:
+     *   - Split by "." → ['permissions', 'items']
+     *   - Check ONLY the first segment on the model
+     *   - If method exists, allow FULL nested string
+     *
+     * @param \Illuminate\Database\Eloquent\Model $modelInstance
+     * @param string[]                            $candidateRelations
+     *
+     * @return string[]
+     */
+    private function filterExistingRelations($modelInstance, array $candidateRelations): array {
+
+        if (empty($candidateRelations)) {
+
+            return [];
+        }
+
+        $valid = [];
+
+        foreach ($candidateRelations as $relationName) {
+
+            if (!is_string($relationName)) {
+
+                continue;
+            }
+
+            $trimmed = trim($relationName);
+
+            if ($trimmed === '') {
+
+                continue;
+            }
+
+            $segments = explode('.', $trimmed);
+            $topLevel = $segments[0];
+
+            if (method_exists($modelInstance, $topLevel)) {
+
+                $valid[] = $trimmed;
+            }
+        }
+
+        return array_values(array_unique($valid));
+    }
+
+    /**
+     * Merge and normalize two relation lists.
+     *
+     * @param string[] $base
+     * @param string[] $extra
+     *
+     * @return string[]
+     */
+    private function mergeRelations(array $base, array $extra): array {
+
+        $result = [];
+
+        foreach (array_merge($base, $extra) as $name) {
+
+            if (!is_string($name)) {
+
+                continue;
+            }
+
+            $trimmed = trim($name);
+
+            if ($trimmed !== '') {
+
+                $result[] = $trimmed;
+            }
+        }
+
+        return array_values(array_unique($result));
+    }
+
+    /**
+     * Minimal persistence for non-eloquent entities.
      *
      * @param UserInterface $userObject
      *
@@ -112,10 +286,12 @@ class EloquentUserRepository implements UserRepositoryInterface {
      */
     private function updateNonEloquentUser(UserInterface $userObject): void {
 
-        EloquentUser::query()->where('id', '=', $userObject->getId())->update([
+        /** @var \Illuminate\Database\Eloquent\Model $model */
+        $model = new $this->userModelClass();
+
+        $model->newQuery()->where('id', '=', $userObject->getId())->update([
 
             'is_activated' => $userObject->isActivated() ? 1 : 0,
-            'updated_at'   => date('Y-m-d H:i:s'),
         ]);
     }
 }

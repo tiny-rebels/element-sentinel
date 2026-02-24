@@ -12,6 +12,8 @@ use Element\Sentinel\Contracts\{
     UserRepositoryInterface
 };
 
+use Element\Sentinel\Services\Exceptions\Auth\{MissingCredentialsException, UserNotFoundException};
+
 use Psr\Log\LoggerInterface;
 
 /**
@@ -182,7 +184,7 @@ final class AuthManager implements AuthManagerInterface {
         // Read the current user id from session (if available)
         if ($isSessionActive) {
 
-            $currentUserId = isset($_SESSION['sentinel_user_id']) ? $_SESSION['sentinel_user_id'] : null;
+            $currentUserId = $_SESSION['sentinel_user_id'] ?? null;
         }
 
         // Server-side & client remember-me cleanup via persistence repository (if configured)

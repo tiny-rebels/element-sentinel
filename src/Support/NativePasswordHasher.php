@@ -12,7 +12,7 @@ class NativePasswordHasher implements PasswordHasherInterface {
      *
      * @return string
      */
-    public function hash($password) {
+    public function hash(string $password): string {
 
         // PASSWORD_DEFAULT er bcrypt i PHP 7.x (60 chars)
         // PHP-manualen anbefaler at bruge DEFAULT for fremtidssikring.
@@ -27,7 +27,7 @@ class NativePasswordHasher implements PasswordHasherInterface {
      *
      * @return bool
      */
-    public function verify($password, $hash) {
+    public function verify(string $password, string $hash): bool {
 
         return password_verify($password, $hash);
     }
@@ -38,8 +38,30 @@ class NativePasswordHasher implements PasswordHasherInterface {
      * @param string $hash
      * @return bool
      */
-    public function needsRehash($hash) {
+    public function needsRehash(string $hash): bool {
 
         return password_needs_rehash($hash, PASSWORD_DEFAULT);
     }
+
+    /**
+     * Resolve a PasswordHasherInterface from a mixed input.
+     *
+     * Rules:
+     *  - If $hasher is already an instance of PasswordHasherInterface, return it.
+     *  - Otherwise, return a new NativePasswordHasher().
+     *
+     * @param mixed $hasher
+     *
+     * @return PasswordHasherInterface
+     */
+    public static function resolveHasher($hasher): PasswordHasherInterface {
+
+        if ($hasher instanceof PasswordHasherInterface) {
+
+            return $hasher;
+        }
+
+        return new self();
+    }
+
 }

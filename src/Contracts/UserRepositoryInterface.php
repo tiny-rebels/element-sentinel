@@ -13,10 +13,11 @@ interface UserRepositoryInterface {
      * Find a user by primary key.
      *
      * @param int|string $id
+     * @param array $withRelations
      *
      * @return UserInterface|null
      */
-    public function findById($id): ?UserInterface;
+    public function findById($id, array $withRelations = []): ?UserInterface;
 
     /**
      * Persist a user entity.
@@ -38,7 +39,9 @@ interface UserRepositoryInterface {
      * - This is framework-agnostic. Your application must set
      *   $_SESSION['sentinel_user_id'] after a successful login.
      *
+     * @param string[] $withRelations Optional list of relation method names to eager-load
+     *
      * @return UserInterface|null
      */
-    public function check(): ?UserInterface;
+    public function check(array $withRelations = []): ?UserInterface;
 }

@@ -10,36 +10,63 @@ use Element\Sentinel\Contracts\{
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * EloquentCredentialsRepository (email-only)
+ * EloquentCredentialsRepository
  *
- * Eloquent adapter for login lookup + password hash access, strictly by "email".
+ * Eloquent adapter for login lookup (email-only in your design) + password hash access.
+ * Pluggable user model class and optional eager relations (fail-safe).
  */
 class EloquentCredentialsRepository implements CredentialsRepositoryInterface {
 
     /** @var class-string<Model&UserInterface> */
     private $userModelClass;
 
+    /** @var string[] */
+    private $eagerRelations;
+
     /**
-     * @param string $userModelClass Fully-qualified class name of your Eloquent user model (implements UserInterface)
+     * @param string   $userModelClass FQCN of your Eloquent user model (implements UserInterface)
+     *
+     * @param string[] $eagerRelations Optional list of relation names to eager-load
      */
-    public function __construct($userModelClass) {
+    public function __construct(string $userModelClass, array $eagerRelations = []) {
 
         $this->userModelClass = $userModelClass;
+        $this->eagerRelations = $eagerRelations;
     }
 
     /**
      * Find user strictly by email address.
      *
-     * @param string $login
+     * @param string $login  Email value (library is email-only by design)
      *
      * @return UserInterface|null
      */
     public function findByLogin($login): ?UserInterface {
 
-        /** @var Model $modelInstance */
-        $modelInstance = new $this->userModelClass();
+        /** @var Model $model */
+        $model = new $this->userModelClass();
 
-        $foundUser = $modelInstance->newQuery()->where('email', '=', $login)->first();
+        $query = $model->newQuery();
+
+
+        $exists = $model->newQuery()->where('email', '=', $login)->exists();
+        error_log(sprintf(
+            '[Sentinel DIAG] model=%s table=%s email=%s exists=%s',
+            get_class($model),
+            $model->getTable(),
+            $login,
+            $exists ? '1' : '0'
+        ));
+
+
+        $safeRelations = $this->filterExistingRelations($model, $this->eagerRelations);
+
+        if (!empty($safeRelations)) {
+
+            $query->with($safeRelations);
+        }
+
+        $foundUser = $query->where('email', $login)->first();
 
         return ($foundUser instanceof UserInterface) ? $foundUser : null;
     }
@@ -47,55 +74,83 @@ class EloquentCredentialsRepository implements CredentialsRepositoryInterface {
     /**
      * Return the stored password hash for the given user.
      *
-     * Uses Eloquent getAttribute to reliably read the "password" column.
-     *
      * @param UserInterface $user
      *
      * @return string
      */
     public function getPasswordHash(UserInterface $user): string {
 
-        if ($user instanceof Model) {
+        if (is_object($user)) {
 
-            $value = $user->getAttribute('password'); // works even if hidden/casted
+            if (property_exists($user, 'password')) {
 
-            return is_string($value) ? $value : '';
+                return (string) $user->password;
+            }
+
+            if (method_exists($user, 'getPassword')) {
+
+                return (string) $user->getPassword();
+            }
         }
 
-        // Fallback for non-Eloquent implementations (magic getter)
-        $value = $user->password ?? null;
-
-        return is_string($value) ? $value : '';
+        return '';
     }
 
     /**
      * Update (rehash) the stored password for the given user.
      *
-     * Uses Eloquent set/get to be consistent with attribute access.
-     *
      * @param UserInterface $user
      *
-     * @param string $newHash
+     * @param string        $newHash
      *
      * @return void
      */
     public function updatePassword(UserInterface $user, $newHash): void {
 
-        if ($user instanceof Model) {
+        if (is_object($user)) {
 
-            $user->setAttribute('password', $newHash);
+            if (property_exists($user, 'password')) {
 
-            return;
+                $user->password = $newHash;
+
+            } elseif (method_exists($user, 'setPassword')) {
+
+                $user->setPassword($newHash);
+            }
+        }
+        // Persisting is handled by the caller via UserRepository::save()
+    }
+
+    /**
+     * Return only relations that actually exist as methods on the model.
+     *
+     * @param Model    $modelInstance
+     * @param string[] $candidateRelations
+     *
+     * @return string[]
+     */
+    private function filterExistingRelations(Model $modelInstance, array $candidateRelations): array {
+
+        if (empty($candidateRelations)) {
+
+            return [];
         }
 
-        // Fallback for non-Eloquent implementations
-        if (isset($user->password)) {
+        $valid = [];
 
-            $user->password = $newHash;
+        foreach ($candidateRelations as $relationName) {
 
-        } elseif (method_exists($user, 'setPassword')) {
+            if (!is_string($relationName) || $relationName === '') {
 
-            $user->setPassword($newHash);
+                continue;
+            }
+
+            if (method_exists($modelInstance, $relationName)) {
+
+                $valid[] = $relationName;
+            }
         }
+
+        return array_values(array_unique($valid));
     }
 }
