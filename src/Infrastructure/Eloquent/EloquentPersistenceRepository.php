@@ -3,6 +3,7 @@
 namespace Element\Sentinel\Infrastructure\Eloquent;
 
 use Element\Sentinel\Contracts\PersistenceRepositoryInterface;
+
 use Element\Sentinel\Support\CodeGenerator;
 
 /**
@@ -123,6 +124,14 @@ class EloquentPersistenceRepository implements PersistenceRepositoryInterface {
 
         // Also clear current browser cookie if present
         $this->setCookie('', time() - 3600);
+    }
+
+    /**
+     * @return void
+     */
+    public function forget(): void {
+
+        $this->forgetCurrent();
     }
 
     /**

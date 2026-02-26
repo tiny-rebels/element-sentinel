@@ -30,6 +30,16 @@ class EloquentUser extends Model implements UserInterface {
     /** @var bool */
     public $timestamps = true;
 
+    /**
+     * Optionally cast boolean-like columns, if these are stored as tinyint(1).
+     *
+     * @var array<string,string>
+     */
+    protected $casts = [
+
+        'uuid' => 'string'
+    ];
+
     /** @return int|string|null */
     public function getId() {
 
@@ -47,7 +57,6 @@ class EloquentUser extends Model implements UserInterface {
 
         $this->is_activated = 1;
     }
-
 
     /**
      * Many-to-many: roles for this user.

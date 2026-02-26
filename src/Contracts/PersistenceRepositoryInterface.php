@@ -10,7 +10,6 @@ namespace Element\Sentinel\Contracts;
  */
 interface PersistenceRepositoryInterface {
 
-
     /**
      * Create and persist a remember-me token for the given user id (server-side),
      * and write a signed/opaque cookie on the client.

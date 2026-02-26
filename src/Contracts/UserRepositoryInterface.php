@@ -10,14 +10,34 @@ namespace Element\Sentinel\Contracts;
 interface UserRepositoryInterface {
 
     /**
-     * Find a user by primary key.
+     * Find a user by ID.
      *
-     * @param int|string $id
+     * @param int $id
      * @param array $withRelations
      *
      * @return UserInterface|null
      */
-    public function findById($id, array $withRelations = []): ?UserInterface;
+    public function findById(int $id, array $withRelations = []): ?UserInterface;
+
+    /**
+     * Find a user by UUID.
+     *
+     * @param string $uuid
+     * @param array $withRelations
+     *
+     * @return UserInterface|null
+     */
+    public function findByUuid(string $uuid, array $withRelations = []): ?UserInterface;
+
+    /**
+     * Find a user by email.
+     *
+     * @param string $email
+     * @param array $withRelations
+     *
+     * @return UserInterface|null
+     */
+    public function findByEmail(string $email, array $withRelations = []): ?UserInterface;
 
     /**
      * Persist a user entity.

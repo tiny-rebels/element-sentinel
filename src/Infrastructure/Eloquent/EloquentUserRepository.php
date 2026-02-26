@@ -98,7 +98,7 @@ class EloquentUserRepository implements UserRepositoryInterface {
 
         if (!empty($sessionUserId)) {
 
-            return $this->findByIdWith($sessionUserId, $withRelations);
+            return $this->lookupUser($sessionUserId, $withRelations);
         }
 
         if ($this->persistenceRepository) {
@@ -109,38 +109,11 @@ class EloquentUserRepository implements UserRepositoryInterface {
 
                 $_SESSION['sentinel_user_id'] = $rememberUserId;
 
-                return $this->findByIdWith($rememberUserId, $withRelations);
+                return $this->lookupUser($rememberUserId, $withRelations);
             }
         }
 
         return null;
-    }
-
-    /**
-     * Find user by primary key with default eager-relations only.
-     *
-     * @param int|string $userId
-     * @param array $withRelations
-     *
-     * @return UserInterface|null
-     */
-    public function findById($userId, array $withRelations = []): ?UserInterface {
-
-        if (!$this->honorRuntimeRelations && !empty($withRelations)) {
-
-            throw new RelationsNotSupportedException(
-                'Runtime eager-loading (withRelations) is not supported for local user models. Local relations must be defined directly on the application model.',
-                1802,
-                null,
-                [
-                    'withRelations' => $withRelations,
-                    'userModelClass' => $this->userModelClass,
-                ]
-            );
-        }
-
-        return $this->findByIdWith($userId, $withRelations);
-
     }
 
     /**
@@ -163,26 +136,115 @@ class EloquentUserRepository implements UserRepositoryInterface {
     }
 
     /**
-     * Internal helper: find user with optional eager-loading.
+     * Find user by primary key with default eager-relations only.
      *
-     * Supports nested relations such as "permissions.items".
-     *
-     * @param int|string $userId
-     * @param string[]   $withRelations
+     * @param int $id
+     * @param array $withRelations
      *
      * @return UserInterface|null
      */
-    private function findByIdWith($userId, array $withRelations): ?UserInterface {
+    public function findById(int $id, array $withRelations = []): ?UserInterface {
+
+        if (!$this->honorRuntimeRelations && !empty($withRelations)) {
+
+            throw new RelationsNotSupportedException(
+                'Runtime eager-loading (withRelations) is not supported for local user models. Local relations must be defined directly on the application model.',
+                1802,
+                null,
+                [
+                    'withRelations' => $withRelations,
+                    'userModelClass' => $this->userModelClass,
+                ]
+            );
+        }
+
+        // Delegate to the unified lookup method.
+        return $this->lookupUser($id, $withRelations);
+    }
+
+    /**
+     * Find a user by UUID.
+     *
+     * @param string $uuid
+     * @param string[] $withRelations
+     *
+     * @return UserInterface|null
+     */
+    public function findByUuid(string $uuid, array $withRelations = []): ?UserInterface {
+
+        if (!$this->honorRuntimeRelations && !empty($withRelations)) {
+
+            throw new RelationsNotSupportedException(
+                'Runtime eager-loading (withRelations) is not supported for local user models. Local relations must be defined directly on the application model.',
+                1803,
+                null,
+                [
+                    'withRelations'  => $withRelations,
+                    'userModelClass' => $this->userModelClass,
+                    'uuid'           => $uuid,
+                ]
+            );
+        }
+
+        // Delegate to the unified lookup method.
+        return $this->lookupUser($uuid, $withRelations);
+    }
+
+    /**
+     * Find a user by email.
+     *
+     * @param string $email
+     * @param string[] $withRelations
+     *
+     * @return UserInterface|null
+     */
+    public function findByEmail(string $email, array $withRelations = []): ?UserInterface {
+
+        if (!$this->honorRuntimeRelations && !empty($withRelations)) {
+
+            throw new RelationsNotSupportedException(
+                'Runtime eager-loading (withRelations) is not supported for local user models. Local relations must be defined directly on the application model.',
+                1803,
+                null,
+                [
+                    'withRelations'  => $withRelations,
+                    'userModelClass' => $this->userModelClass,
+                    'email'          => $email,
+                ]
+            );
+        }
+
+        // Delegate to the unified lookup method.
+        return $this->lookupUser($email, $withRelations);
+    }
+
+    /**
+     * Internal helper: Unified user lookup by either ID, UUID or email.
+     *
+     * Resolution order:
+     *  - If $identifier is a valid email  -> where('email', $identifier)->first()
+     *  - Else if $identifier looks like UUID (8-4-4-4-12) -> where('uuid', $identifier)->first()
+     *  - Else -> ->find($identifier)  (primary key lookup; works for int or string PKs)
+     *
+     *  - Honors default eager relations and optional runtime relations (when allowed)
+     *    such as "permissions.items".
+     *
+     * @param mixed     $identifier         Expected: int|string (ID/email/uuid)
+     * @param string[]  $withRelations
+     *
+     * @return UserInterface|null
+     */
+
+    private function lookupUser($identifier, array $withRelations = []): ?UserInterface {
 
         /** @var \Illuminate\Database\Eloquent\Model $model */
         $model = new $this->userModelClass();
-
         $query = $model->newQuery();
 
         // Merge default eager relations with runtime ones, but only if allowed
         $relations = $this->honorRuntimeRelations ? $this->mergeRelations($this->defaultEagerRelations, $withRelations) : $this->defaultEagerRelations;
 
-        // Fail-safe filtering: allow nested relations but check only top-level methods
+        // Fail-safe: only include relations that actually exist on the model
         $safeRelations = $this->filterExistingRelations($model, $relations);
 
         if (!empty($safeRelations)) {
@@ -190,7 +252,28 @@ class EloquentUserRepository implements UserRepositoryInterface {
             $query->with($safeRelations);
         }
 
-        $found = $query->find($userId);
+        // Normalize to string for checks that require string
+        $identifierStr = is_string($identifier) ? $identifier : (string) $identifier;
+
+        // 1) Email?
+        $isEmail = is_string($identifier) && filter_var($identifier, FILTER_VALIDATE_EMAIL);
+
+        // 2) UUID? (generic RFC 4122 8-4-4-4-12, case-insensitive)
+        $isUuid = is_string($identifier) && preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $identifierStr) === 1;
+
+        if ($isEmail) {
+
+            $found = $query->where('email', '=', $identifierStr)->first();
+
+        } elseif ($isUuid) {
+
+            $found = $query->where('uuid', '=', $identifierStr)->first();
+
+        } else {
+
+            // Primary key lookup (supports int or string PKs)
+            $found = $query->find($identifier);
+        }
 
         return ($found instanceof UserInterface) ? $found : null;
     }

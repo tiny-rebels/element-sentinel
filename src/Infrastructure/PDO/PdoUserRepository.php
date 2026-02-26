@@ -34,11 +34,11 @@ class PdoUserRepository implements UserRepositoryInterface {
     }
 
     /**
-     * @param int|string $id
+     * @param int $id
      *
      * @return UserInterface|null
      */
-    public function findById($id) {
+    public function findById(int $id) {
 
         $sql = "SELECT id, email, password, activated, created_at, updated_at
                 FROM {$this->table}

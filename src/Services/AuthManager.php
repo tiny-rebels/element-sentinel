@@ -274,7 +274,7 @@ final class AuthManager {
 
             try {
 
-                $this->persistencesRepository->forgetCurrent();
+                $this->persistencesRepository->forget();
 
             } catch (\Throwable $error) {
 
