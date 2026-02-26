@@ -4,6 +4,7 @@ namespace Element\Sentinel\Infrastructure\Eloquent;
 
 use Element\Sentinel\Contracts\{
     CredentialsRepositoryInterface,
+    PasswordHasherInterface,
     UserInterface
 };
 
@@ -37,27 +38,25 @@ class EloquentCredentialsRepository implements CredentialsRepositoryInterface {
     /**
      * Find user strictly by email address.
      *
-     * @param string $login  Email value (library is email-only by design)
+     * @param string $email  Email value (library is email-only by design)
      *
      * @return UserInterface|null
      */
-    public function findByLogin($login): ?UserInterface {
+    public function find($email): ?UserInterface {
 
         /** @var Model $model */
         $model = new $this->userModelClass();
 
         $query = $model->newQuery();
 
-
-        $exists = $model->newQuery()->where('email', '=', $login)->exists();
+        $exists = $model->newQuery()->where('email', '=', $email)->exists();
         error_log(sprintf(
             '[Sentinel DIAG] model=%s table=%s email=%s exists=%s',
             get_class($model),
             $model->getTable(),
-            $login,
+            $email,
             $exists ? '1' : '0'
         ));
-
 
         $safeRelations = $this->filterExistingRelations($model, $this->eagerRelations);
 
@@ -66,7 +65,7 @@ class EloquentCredentialsRepository implements CredentialsRepositoryInterface {
             $query->with($safeRelations);
         }
 
-        $foundUser = $query->where('email', $login)->first();
+        $foundUser = $query->where('email', $email)->first();
 
         return ($foundUser instanceof UserInterface) ? $foundUser : null;
     }
@@ -152,5 +151,43 @@ class EloquentCredentialsRepository implements CredentialsRepositoryInterface {
         }
 
         return array_values(array_unique($valid));
+    }
+
+    /**
+     * @param UserInterface $user
+     * @param string $plainPassword
+     * @param PasswordHasherInterface $hasher
+     *
+     * @return bool
+     */
+    public function verify(UserInterface $user, string $plainPassword, PasswordHasherInterface $hasher): bool {
+
+        // 1) Resolve stored hash from the model consistently
+        $storedHash = '';
+
+        // Prefer a dedicated getter if you have one
+        if (method_exists($user, 'getPassword')) {
+
+            $storedHash = (string) $user->getPassword();
+
+        } elseif (isset($user->password) && is_string($user->password)) {
+
+            // Typical Eloquent column: 'password'
+            $storedHash = $user->password;
+
+        } elseif (isset($user->password_hash) && is_string($user->password_hash)) {
+
+            // Alternative column name, adjust if your schema differs
+            $storedHash = $user->password_hash;
+        }
+
+        // Defensive: empty hash should never verify
+        if ($storedHash === '') {
+
+            return false;
+        }
+
+        // 2) Delegate to the hasher implementation (bcrypt/argon2/etc)
+        return $hasher->verify($plainPassword, $storedHash);
     }
 }

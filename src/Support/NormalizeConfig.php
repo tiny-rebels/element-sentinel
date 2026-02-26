@@ -2,8 +2,6 @@
 
 namespace Element\Sentinel\Support;
 
-use Element\Sentinel\Contracts\PasswordHasherInterface;
-
 use Element\Sentinel\Infrastructure\Eloquent\{
     EloquentActivationRepository,
     EloquentCredentialsRepository,
@@ -26,7 +24,10 @@ use Element\Sentinel\Services\{
     RoleManager
 };
 
-use Element\Sentinel\Services\Security\ThrottleCheckpoint;
+use Element\Sentinel\Services\Security\{
+    ThrottleCheckpoint,
+    ActivationCheckpoint
+};
 
 /**
  * NormalizeConfig
@@ -47,8 +48,7 @@ final class NormalizeConfig {
 
         $rawConfiguration = self::extractArray($inputConfiguration);
 
-        // Preferred top-level section is "sentinel".
-        // Backward compatibility: fall back to "auth" or to root array.
+        // Preferred top-level section is "sentinel"; fallback to "auth" or root.
         $configuration = (isset($rawConfiguration['sentinel']) && is_array($rawConfiguration['sentinel']))
             ? $rawConfiguration['sentinel']
             : ((isset($rawConfiguration['auth']) && is_array($rawConfiguration['auth'])) ? $rawConfiguration['auth'] : $rawConfiguration);
@@ -85,12 +85,13 @@ final class NormalizeConfig {
                     ? $configuration['models']['users']['class']
                     : EloquentUser::class;
 
+                // Validator and NativePasswordHasher are in the same namespace (Support), so no import is required.
                 Validator::validateUserModel($userModelClass);
 
-                // No YAML relations → empty by design
+                // No YAML relations → intentionally empty
                 $defaultEagerRelations = [];
 
-                // Allow runtime withRelations only for the standard EloquentUser
+                // Only honor runtime withRelations when using the standard EloquentUser
                 $honorRuntimeRelations = ($userModelClass === EloquentUser::class);
 
                 /*
@@ -124,7 +125,10 @@ final class NormalizeConfig {
                 /*
                  * Credentials (email‑only, pluggable model)
                  */
-                $credentialsRepository = new EloquentCredentialsRepository($userModelClass, []);
+                $credentialsRepository = new EloquentCredentialsRepository(
+                    $userModelClass,
+                    [] // no default eager relations
+                );
 
                 /*
                  * Roles (pluggable)
@@ -156,9 +160,13 @@ final class NormalizeConfig {
                 /*
                  * Permissions (pluggable) — user-based column "user" (hasMany) + role pivot (permission_role)
                  */
-                $permissionsConfiguration = (isset($configuration['models']['permissions']) && is_array($configuration['models']['permissions'])) ? $configuration['models']['permissions'] : [];
+                $permissionsConfiguration = (isset($configuration['models']['permissions']) && is_array($configuration['models']['permissions']))
+                    ? $configuration['models']['permissions']
+                    : [];
 
-                $permissionModelClass = (isset($permissionsConfiguration['class']) && is_string($permissionsConfiguration['class'])) ? $permissionsConfiguration['class'] : EloquentPermission::class;
+                $permissionModelClass = (isset($permissionsConfiguration['class']) && is_string($permissionsConfiguration['class']))
+                    ? $permissionsConfiguration['class']
+                    : EloquentPermission::class;
 
                 Validator::validatePermissionModel($permissionModelClass);
 
@@ -181,44 +189,128 @@ final class NormalizeConfig {
                 $automaticallyCreateMissingPermissions = !isset($configuration['permissions']['auto_create']) || (bool)$configuration['permissions']['auto_create'];
 
                 /*
-                 * Throttling (global/ip/user) via Infrastructure/Policies\ThrottlePolicy
-                 * YAML example expected under: sentinel.throttling
+                 * Throttling (global/ip/user) + Checkpoints
+                 * YAML examples under: sentinel.throttling and sentinel.checkpoints
                  */
-                $throttlingConfig = isset($configuration['throttling']) && is_array($configuration['throttling']) ? $configuration['throttling'] : [];
+                $throttlingConfig = isset($configuration['throttling']) && is_array($configuration['throttling'])
+                    ? $configuration['throttling']
+                    : [];
 
-                // Helper to build a ThrottlePolicy per scope
+                // Helper to build a ThrottlePolicy per scope (with suspension_seconds)
                 $buildPolicy = function (array $cfg, string $scope, int $defaultInterval, $defaultThresholds, int $defaultSuspensionSeconds) {
                     $scopeCfg   = isset($cfg[$scope]) && is_array($cfg[$scope]) ? $cfg[$scope] : [];
                     $interval   = isset($scopeCfg['interval']) ? (int) $scopeCfg['interval'] : $defaultInterval;
                     $thresholds = $scopeCfg['thresholds'] ?? $defaultThresholds;
+                    $suspension = isset($scopeCfg['suspension_seconds']) ? (int) $scopeCfg['suspension_seconds'] : $defaultSuspensionSeconds;
 
-                    // If you later add "suspension_seconds" per scope in YAML:
-                    // $suspension = isset($scopeCfg['suspension_seconds']) ? (int) $scopeCfg['suspension_seconds'] : $defaultSuspensionSeconds;
-                    $suspension = $defaultSuspensionSeconds;
-
+                    // Note: for map-thresholds (e.g., global), ThrottlePolicy resolves suspension from the map (minutes→seconds),
+                    // and this $suspension value is effectively ignored.
                     return new ThrottlePolicy($interval, $thresholds, $suspension);
                 };
 
-                // Your YAML: global has a map (attempts => minutes), ip/user are integers.
+                // Your YAML example: global has a map (attempts => minutes), ip/user use integers
                 $globalPolicy = $buildPolicy($throttlingConfig, 'global', 900, [], 60);
                 $ipPolicy     = $buildPolicy($throttlingConfig, 'ip',     900, 5,  60);
                 $userPolicy   = $buildPolicy($throttlingConfig, 'user',   900, 5,  60);
 
                 $throttleRepository = new EloquentThrottleRepository(
-                    'throttle_entries',
+                    'throttle',
                     $globalPolicy,
                     $ipPolicy,
                     $userPolicy
                 );
 
-                // Optionally allow disabling checkpoint via config later; keep it enabled for now.
-                $throttleEnabled    = true;
+                // Checkpoints list from YAML (ordered). Default: throttle + activation
+                $checkpointsList = [];
 
-                $throttleCheckpoint = new ThrottleCheckpoint($throttleRepository, $throttleEnabled);
+                if (isset($configuration['checkpoints']) && is_array($configuration['checkpoints'])) {
+
+                    foreach ($configuration['checkpoints'] as $cp) {
+
+                        if (is_string($cp)) {
+
+                            $name = trim($cp);
+
+                            if ($name !== '') {
+
+                                $checkpointsList[] = strtolower($name);
+                            }
+                        }
+                    }
+                }
+
+                $throttleCheckpointEnabled = in_array('throttle', $checkpointsList, true) || empty($checkpointsList);
+                $throttleCheckpoint        = new ThrottleCheckpoint($throttleRepository, $throttleCheckpointEnabled);
+
+                // Activation policy (expires + lottery)
+                $activationsCfg         = (isset($configuration['activations']) && is_array($configuration['activations'])) ? $configuration['activations'] : [];
+                $activationExpires      = isset($activationsCfg['expires']) ? (int) $activationsCfg['expires'] : 0; // 0 = never expires
+                $activationLotteryArray = (isset($activationsCfg['lottery']) && is_array($activationsCfg['lottery'])) ? $activationsCfg['lottery'] : [0, 0];
+
+                $activationLotteryNumerator   = isset($activationLotteryArray[0]) ? (int) $activationLotteryArray[0] : 0;
+                $activationLotteryDenominator = isset($activationLotteryArray[1]) ? (int) $activationLotteryArray[1] : 0;
+
+                // Minimal activation policy value-object
+                $activationPolicy = new class($activationExpires, $activationLotteryNumerator, $activationLotteryDenominator) {
+
+                    /** @var int */
+                    private $expirationSeconds;
+                    /** @var int */
+                    private $lotteryNumerator;
+                    /** @var int */
+                    private $lotteryDenominator;
+
+                    public function __construct(int $expirationSeconds, int $lotteryNumerator, int $lotteryDenominator) {
+
+                        $this->expirationSeconds   = $expirationSeconds;
+                        $this->lotteryNumerator    = $lotteryNumerator;
+                        $this->lotteryDenominator  = $lotteryDenominator;
+                    }
+
+                    public function expirationSeconds(): int { return $this->expirationSeconds; }
+                    public function lotteryNumerator(): int  { return $this->lotteryNumerator; }
+                    public function lotteryDenominator(): int { return $this->lotteryDenominator; }
+                    public function shouldRunLottery(): bool {
+
+                        if ($this->lotteryDenominator <= 0 || $this->lotteryNumerator <= 0) {
+
+                            return false;
+                        }
+
+                        return mt_rand(1, $this->lotteryDenominator) <= $this->lotteryNumerator;
+                    }
+                };
+
+                $activationCheckpointEnabled = in_array('activation', $checkpointsList, true) || empty($checkpointsList);
+                $activationCheckpoint        = new ActivationCheckpoint($activationCheckpointEnabled);
+
+                // Ordered checkpoints
+                $orderedCheckpoints = [];
+
+                if (!empty($checkpointsList)) {
+
+                    foreach ($checkpointsList as $checkpointName) {
+
+                        if ($checkpointName === 'throttle') {
+
+                            $orderedCheckpoints[] = $throttleCheckpoint;
+
+                        } elseif ($checkpointName === 'activation') {
+
+                            $orderedCheckpoints[] = $activationCheckpoint;
+                        }
+                    }
+
+                } else {
+
+                    $orderedCheckpoints[] = $throttleCheckpoint;
+                    $orderedCheckpoints[] = $activationCheckpoint;
+                }
 
                 break;
 
             default:
+
                 throw new \InvalidArgumentException('Unsupported adapter: ' . $adapterName);
         }
 
@@ -242,7 +334,7 @@ final class NormalizeConfig {
             $automaticallyCreateMissingRoles
         );
 
-        // PermissionManager is ALWAYS combined; boolean sets auto-create
+        // PermissionManager is ALWAYS combined; boolean controls auto-create
         $permissionManager = new PermissionManager(
             $permissionsRepository,
             $rolesRepository,
@@ -259,6 +351,14 @@ final class NormalizeConfig {
             $loggerInstance
         );
 
+        // ✅ Wiring-hint: give AuthManager the security components (ordered checkpoints + instances + policy)
+        $authManager->configureSecurity(
+            $orderedCheckpoints,
+            $throttleCheckpoint,
+            $activationCheckpoint,
+            $activationPolicy
+        );
+
         /*
          * 5) Canonical structure (repositories + hasher + optional logger + services)
          */
@@ -272,18 +372,22 @@ final class NormalizeConfig {
                 'permissions'  => $permissionsRepository,
                 'throttle'     => $throttleRepository,
             ],
-            'hasher' => $passwordHasher,
+            'hasher'   => $passwordHasher,
             'services' => [
                 'auth'        => $authManager,
                 'roles'       => $roleManager,
                 'permissions' => $permissionManager,
                 'security'    => [
-                    'throttle' => $throttleCheckpoint,
+                    'throttle'          => $throttleCheckpoint,
+                    'activation'        => $activationCheckpoint,
+                    'activation_policy' => $activationPolicy,
+                    'checkpoints'       => $orderedCheckpoints,
                 ],
             ],
         ];
 
         if ($loggerInstance !== null) {
+
             $canonical['logger'] = $loggerInstance;
         }
 
