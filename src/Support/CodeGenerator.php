@@ -9,7 +9,7 @@ class CodeGenerator {
      *
      * Default alphabet: {@see self::alphabetSymbolRich()} (letters, digits, and a moderate set of symbols).
      *
-     * @param int         $length    Desired length of the code (number of characters).
+     * @param int $length    Desired length of the code (number of characters).
      * @param string|null $alphabet  Custom alphabet to pick characters from. If null, uses alphabetSymbolRich().
      *
      * @return string
@@ -17,7 +17,7 @@ class CodeGenerator {
      * @throws \InvalidArgumentException If the provided alphabet has fewer than 2 characters.
      * @throws \Exception                If a secure random integer cannot be generated (random_int failure).
      */
-    public static function random($length = 32, $alphabet = null) {
+    public static function random(int $length = 32, string $alphabet = null): string {
 
         if ($alphabet === null) {
 
@@ -50,7 +50,7 @@ class CodeGenerator {
      *
      * @return string
      */
-    public static function alphabetAlnum() {
+    public static function alphabetAlnum(): string {
 
         return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     }
@@ -63,7 +63,7 @@ class CodeGenerator {
      *
      * @return string
      */
-    public static function alphabetUrlSafe() {
+    public static function alphabetUrlSafe(): string {
 
         return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
     }
@@ -76,7 +76,7 @@ class CodeGenerator {
      *
      * @return string
      */
-    public static function alphabetSymbolRich() {
+    public static function alphabetSymbolRich(): string {
 
         return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~!*$@';
     }
@@ -89,6 +89,6 @@ class CodeGenerator {
      *
      * Keep in mind:
      * - Use URL-encoding when placing codes in query parameters.
-     * - Ensure your database column length (e.g., CHAR(64)) matches the code length you generate.
+     * - Ensure your schemas column length (e.g., CHAR(64)) matches the code length you generate.
      */
 }

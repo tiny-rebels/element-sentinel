@@ -9,28 +9,28 @@ interface ActivationRepositoryInterface {
      *
      * @return ActivationInterface
      */
-    public function create(UserInterface $user);
+    public function create(UserInterface $user): ActivationInterface;
 
     /**
      * @param UserInterface $user
      *
      * @return bool
      */
-    public function exists(UserInterface $user);
+    public function exists(UserInterface $user): bool;
 
     /**
      * @param UserInterface $user
      *
      * @return ActivationInterface|null
      */
-    public function findOpenByUser(UserInterface $user);
+    public function findOpenByUser(UserInterface $user): ?ActivationInterface;
 
     /**
      * @param string $code
      *
      * @return ActivationInterface|null
      */
-    public function findByCode($code);
+    public function findByCode(string $code): ?ActivationInterface;
 
     /**
      * @param UserInterface $user
@@ -38,6 +38,6 @@ interface ActivationRepositoryInterface {
      *
      * @return bool
      */
-    public function complete(UserInterface $user, $code);
+    public function complete(UserInterface $user, string $code): bool;
 
 }

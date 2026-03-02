@@ -4,269 +4,678 @@ namespace Element\Sentinel;
 
 use Element\Sentinel\Contracts\{
     ActivationRepositoryInterface,
-    CredentialsRepositoryInterface,
-    PasswordHasherInterface,
-    PersistenceRepositoryInterface,
-    UserInterface,
-    UserRepositoryInterface,
-    AuthManagerInterface
+    UserRepositoryInterface
+};
+
+use Element\Sentinel\Services\{
+    ActivationManager,
+    AuthManager,
+    PermissionManager,
+    RoleManager
 };
 
 use Element\Sentinel\Support\NormalizeConfig;
 
-use Psr\Log\LoggerInterface;
+use Psr\Log\{
+    LoggerInterface,
+    NullLogger
+};
 
 /**
- * Sentinel (Facade)
+ * Sentinel
  *
- * Framework-agnostic static facade that exposes:
- * - deploy(array $config): build the global instance from normalized config
- * - repository shortcuts: users(), activations(), hasher()
- * - authentication shortcuts: authenticate(), logout()
- *
- * All business logic lives in Services\AuthManager.
+ * Main façade / static entrypoint for accessing the authentication system.
+ * - Static facade pattern (similar to Cartalyst style).
+ * - Parameterless singleton constructor (safe lazy init).
+ * - Configurable via deploy() -> NormalizeConfig.
  */
 final class Sentinel {
 
-    /** @var UserRepositoryInterface */
-    private $userRepository;
-
-    /** @var ActivationRepositoryInterface */
-    private $activationRepository;
-
-    /** @var PasswordHasherInterface */
-    private $passwordHasher;
-
-    /** @var LoggerInterface|null */
-    private $logger;
-
-    /** @var CredentialsRepositoryInterface|null */
-    private $credentialsRepository;
-
-    /** @var PersistenceRepositoryInterface|null */
-    private $persistenceRepository;
-
-    /** @var AuthManagerInterface|null */
-    private $authManager;
-
-    /** @var self|null */
+    /** @var Sentinel|null */
     private static $instance = null;
 
+    /** @var array<string,mixed> Canonical services (auth, roles, permissions, security[...]) */
+    private $services = [];
+
+    /** @var array<string,mixed> Arbitrary repositories bag (e.g., ['users' => ..., 'credentials' => ...]) */
+    private $repositories = [];
+
+    /** @var UserRepositoryInterface|null Direct shortcut to the user repository (optional convenience) */
+    protected $userRepository;
+
+    /** @var mixed|null Optional PSR logger or any logger (injected via deploy) */
+    protected $logger;
+
     /**
-     * Construct a Sentinel facade instance with concrete dependencies.
-     *
-     * @param UserRepositoryInterface             $userRepository
-     *
-     * @param ActivationRepositoryInterface       $activationRepository
-     *
-     * @param PasswordHasherInterface             $passwordHasher
-     *
-     * @param LoggerInterface|null                $logger
-     *
-     * @param CredentialsRepositoryInterface|null $credentialsRepository
-     *
-     * @param PersistenceRepositoryInterface|null $persistenceRepository
+     * Prevent external instantiation.
+     * Keep parameterless to allow Sentinel::instance() to work without DI surprises.
      */
-    public function __construct(
-        UserRepositoryInterface $userRepository,
-        ActivationRepositoryInterface $activationRepository,
-        PasswordHasherInterface $passwordHasher,
-        LoggerInterface $logger = null,
-        CredentialsRepositoryInterface $credentialsRepository = null,
-        PersistenceRepositoryInterface $persistenceRepository = null
-    ) {
-        $this->userRepository        = $userRepository;
-        $this->activationRepository  = $activationRepository;
-        $this->passwordHasher        = $passwordHasher;
-        $this->logger                = $logger;
-        $this->credentialsRepository = $credentialsRepository;
-        $this->persistenceRepository = $persistenceRepository;
-        $this->authManager           = null; // bound during deploy()
+    private function __construct() {
+
+        self::$instance = $this;
     }
 
     /**
-     * Deploy Sentinel from a (possibly symbolic/file-backed) array config.
-     * Uses Support\NormalizeConfig to produce canonical instances + services.
+     * Get singleton instance (construct if needed).
      *
-     * @param array $config
-     *
-     * @return self
+     * @return Sentinel
      */
-    public static function deploy(array $config): self {
+    public static function instance(): Sentinel {
 
-        $canonical = NormalizeConfig::normalize($config);
+        if (self::$instance === null) {
 
-        $userRepository        = $canonical['repositories']['users'];
-        $activationRepository  = $canonical['repositories']['activations'];
-        $credentialsRepository = $canonical['repositories']['credentials'];
-        $persistenceRepository = $canonical['repositories']['persistences'];
-        $passwordHasher        = $canonical['hasher'];
-        $loggerInstance        = $canonical['logger'] ?? null;
-
-        $instance = new self(
-            $userRepository,
-            $activationRepository,
-            $passwordHasher,
-            $loggerInstance,
-            $credentialsRepository,
-            $persistenceRepository
-        );
-
-        // Bind the AuthManager service built by NormalizeConfig
-        $instance->authManager = $canonical['services']['auth'] ?? null;
-
-        self::$instance = $instance;
-
-        return $instance;
-    }
-
-    /**
-     * Get the global Sentinel instance set by deploy().
-     *
-     * @return self
-     *
-     * @throws \RuntimeException
-     */
-    public static function instance(): self {
-
-        if (!self::$instance) {
-
-            throw new \RuntimeException('Sentinel::deploy() has not been called yet.');
+            self::$instance = new Sentinel(); // parameterless is intentional
         }
 
         return self::$instance;
     }
 
     /**
-     * Repository shortcut: users().
+     * Deploy Sentinel by providing the raw configuration.
+     * This uses NormalizeConfig::normalize() to produce the canonical array:
      *
-     * @return UserRepositoryInterface
+     *  [
+     *      'services' => [
+     *          'auth'        => AuthManager,
+     *          'roles'       => RoleManager,
+     *          'permissions' => PermissionManager,
+     *          'security'    => [ 'throttle' => ..., 'activation' => ..., ... ]
+     *      ],
+     *      'repositories' => [
+     *          'users'        => UserRepositoryInterface,
+     *          'credentials'  => CredentialsRepositoryInterface,
+     *          'persistences' => EloquentPersistenceRepository,
+     *          'throttle'     => EloquentThrottleRepository,
+     *          ...
+     *      ],
+     *      'logger' => Psr\Log\LoggerInterface|null
+     *  ]
+     *
+     * @param array $inputConfiguration
+     * @return void
      */
-    public static function users(): UserRepositoryInterface {
+    public static function deploy(array $inputConfiguration): void {
 
-        return self::instance()->userRepository;
-    }
+        $canonical = NormalizeConfig::normalize($inputConfiguration);
 
-    /**
-     * Repository shortcut: activations().
-     *
-     * @return ActivationRepositoryInterface
-     */
-    public static function activations(): ActivationRepositoryInterface {
+        $instance = self::instance();
 
-        return self::instance()->activationRepository;
-    }
+        // Store services (auth, roles, permissions, security)
+        if (isset($canonical['services']) && is_array($canonical['services'])) {
 
-    /**
-     * Shortcut: hasher() → password hasher instance.
-     *
-     * @return PasswordHasherInterface
-     */
-    public static function hasher(): PasswordHasherInterface {
-
-        return self::instance()->passwordHasher;
-    }
-
-    /**
-     * Optional access to configured logger.
-     *
-     * @return LoggerInterface|null
-     */
-    public function logger(): ?LoggerInterface {
-
-        return $this->logger;
-    }
-
-    /**
-     * Sentinel::check() returns the authenticated user or null.
-     *
-     * @return UserInterface|null
-     */
-    public static function check(): ?UserInterface {
-
-        return self::instance()->userRepository->check();
-    }
-
-    /**
-     * Authenticate via the AuthManager service (static convenience).
-     *
-     * Expected input:
-     * [
-     *   'email'    => 'user@example.com',
-     *   'password' => 'PlainTextOrInput',
-     * ]
-     *
-     * @param array{email:string,password:string} $credentials
-     *
-     * @param bool $remember         If true, create a remember-me token and cookie.
-     *
-     * @param bool $requireActivated If true, the user must be activated.
-     *
-     * @return UserInterface|null
-     */
-    public static function authenticate(array $credentials, bool $remember = false, bool $requireActivated = true): ?UserInterface {
-
-        $core = self::instance();
-
-        if (!$core->authManager) {
-
-            throw new \RuntimeException('AuthManager service not available. Check NormalizeConfig/deploy wiring.');
+            $instance->services = $canonical['services'];
         }
 
-        return $core->authManager->authenticate($credentials, $remember, $requireActivated);
+        // Store logger (optional)
+        if (isset($canonical['logger'])) {
+
+            $instance->logger = $canonical['logger'];
+        }
+
+        // Store repositories (optional)
+        if (isset($canonical['repositories']) && is_array($canonical['repositories'])) {
+
+            $instance->repositories = $canonical['repositories'];
+
+            // If a 'users' repository is present, mirror it to the dedicated property for fast access
+            if (isset($canonical['repositories']['users']) && $canonical['repositories']['users'] instanceof UserRepositoryInterface) {
+
+                $instance->userRepository = $canonical['repositories']['users'];
+            }
+        }
     }
 
     /**
-     * Determine if the current visitor is a guest (not authenticated).
+     * Optional setter for the user repository (when wiring outside deploy()).
      *
-     * This is a static convenience wrapper calling into the UserRepository's check()
-     * which itself handles both session-based and remember-me authentication.
+     * @param UserRepositoryInterface $users
+     * @return void
+     */
+    public static function setUserRepository(UserRepositoryInterface $users): void {
+
+        self::instance()->userRepository = $users;
+    }
+
+    /**
+     * Return the currently authenticated user or null.
      *
-     * @return bool True if not authenticated, false otherwise.
+     * NOTE: $withRelations is only honored if the underlying repository supports it.
+     *
+     * @param string[] $withRelations
+     * @return mixed|null (UserInterface|null)
+     */
+    public static function check(array $withRelations = []) {
+
+        $authManager = self::instance()->services['auth'] ?? null;
+
+        if ($authManager === null) {
+
+            throw new \RuntimeException('Auth service is not configured on Sentinel.');
+        }
+
+        return $authManager->check($withRelations);
+    }
+
+    /**
+     * Authenticate a user by credential (email/password).
+     * Delegates to AuthManager::authenticate().
+     *
+     * @param string $email
+     * @param string $password
+     * @param bool   $remember
+     *
+     * @return mixed (UserInterface)
+     */
+    public static function authenticate(string $email, string $password, bool $remember = false) {
+
+        $authManager = self::instance()->services['auth'] ?? null;
+
+        if ($authManager === null) {
+
+            throw new \RuntimeException('Auth service is not configured on Sentinel.');
+        }
+
+        return $authManager->authenticate($email, $password, $remember);
+    }
+
+
+    /**
+     * Register a new user via the configured UserRepository.
+     *
+     * When $login === TRUE, this method will also authenticate the newly created
+     * user by delegating to the configured AuthManager, using the email and password
+     * provided in $attributes. When $remember === TRUE, a persistent "remember me"
+     * cookie will be set as part of the authentication flow.
+     *
+     * @param array $attributes  Associative array: must include 'email' and 'password'.
+     *                           Optional keys: uuid, first_name, last_name, activation_token, ...
+     * @param bool  $activate    If TRUE, the user is created as activated immediately.
+     * @param bool  $login       If TRUE, authenticate the user after successful registration.
+     * @param bool  $remember    Used only when $login === TRUE; sets remember-me persistence.
+     *
+     * @return mixed  (\Element\Sentinel\Contracts\UserInterface)
+     *
+     * @throws \RuntimeException
+     *         When the users repository is not configured.
+     * @throws \InvalidArgumentException|\RuntimeException
+     *         Bubbled up from repository validation/persistence.
+     */
+    public static function register(array $attributes, bool $activate = false, bool $login = false, bool $remember = false) {
+
+        $instance = self::instance();
+
+        // Resolve the users repository
+        $usersRepository = null;
+
+        if (isset($instance->userRepository) && $instance->userRepository) {
+
+            $usersRepository = $instance->userRepository;
+
+        } elseif (isset($instance->repositories['users']) && $instance->repositories['users']) {
+
+            $usersRepository = $instance->repositories['users'];
+
+        } elseif (isset($instance->repositories['user']) && $instance->repositories['user']) {
+
+            $usersRepository = $instance->repositories['user'];
+        }
+
+        if ($usersRepository === null) {
+
+            throw new \RuntimeException('Users repository is not configured on Sentinel.');
+        }
+
+        // 1) Register user using the repository
+        $user = $usersRepository->register($attributes, $activate);
+
+        // 2) Optionally authenticate immediately after registration
+        if ($login === true) {
+
+            // Extract email and password from attributes for the authentication call.
+            // The repository has already hashed and persisted the password, so we use
+            // the plaintext from attributes (as provided by the caller) for verification.
+            $emailFromAttributes    = isset($attributes['email']) ? (string) $attributes['email'] : '';
+            $passwordFromAttributes = isset($attributes['password']) ? (string) $attributes['password'] : '';
+
+            if ($emailFromAttributes !== '' && $passwordFromAttributes !== '') {
+
+                $authManager = $instance->services['auth'] ?? null;
+
+                if ($authManager === null) {
+
+                    throw new \RuntimeException('Auth service is not configured on Sentinel.');
+                }
+
+                // authenticate(email, password, activate, login, remember)
+                // - We do not auto-activate here; $activate was already applied by the repository.
+                // - We DO establish login state (session/remember-me) here.
+                $authManager->authenticate(
+                    $emailFromAttributes,
+                    $passwordFromAttributes,
+                    /* activate */ false,
+                    /* login    */ true,
+                    /* remember */ $remember
+                );
+            }
+        }
+
+        return $user;
+    }
+
+    /**
+     * Validate a user's credentials without performing a login.
+     *
+     * This static helper proxies to AuthManager::validateCredentials() and is
+     * intended for read-only credential checks (e.g., preflight checks in APIs,
+     * gating sensitive changes, etc.). It does NOT establish any authentication
+     * state (no session, no remember-me) and it does NOT execute activation checks.
+     * These responsibilities remain within authenticate().
+     *
+     * Return semantics:
+     * - Returns TRUE when the email exists and the password matches.
+     * - Returns FALSE otherwise.
+     *
+     * Side effects:
+     * - May perform throttle hits/clears depending on the AuthManager configuration.
+     * - May transparently rehash and persist the password if supported by the
+     *   underlying repository and the configured hasher.
+     *
+     * @param string $email
+     *        The email address used as the login identifier.
+     * @param string $password
+     *        The plaintext password provided by the caller.
+     * @param \Element\Sentinel\Contracts\UserInterface|null $authenticatedUser
+     *        Output parameter. On success, this will be set to the resolved user instance.
+     *        On failure, it will remain NULL.
+     *
+     * @return bool
+     *         TRUE if the provided credentials are valid; otherwise FALSE.
+     *
+     * @throws \RuntimeException
+     *         When the Auth service is not configured on Sentinel.
+     */
+    public static function validateCredentials(string $email, string $password, ?\Element\Sentinel\Contracts\UserInterface &$authenticatedUser = null): bool {
+
+        $authManager = self::instance()->services['auth'] ?? null;
+
+        if ($authManager === null) {
+
+            throw new \RuntimeException('Auth service is not configured on Sentinel.');
+        }
+
+        // Delegate to the AuthManager for the actual validation logic
+        return $authManager->validateCredentials($email, $password, $authenticatedUser);
+    }
+
+    /**
+     * Get the configured ActivationRepository instance.
+     *
+     * This static helper provides direct access to the underlying activation
+     * service responsible for creating, locating and completing activation
+     * records for users. It exposes the same instance that was created and
+     * registered during Sentinel::deploy().
+     *
+     * Typical usage:
+     *
+     *     $activation = Sentinel::activation()->exists($user);
+     *
+     * @return object
+     *
+     * @throws \RuntimeException
+     *         When the activation service is not configured.
+     */
+    public static function activation(): object {
+
+        $instance = self::instance();
+
+        $activationRepository = $instance->services['activations'] ?? null;
+
+        if ($activationRepository === null) {
+
+            throw new \RuntimeException('Activation service is not configured on Sentinel.');
+        }
+
+        return $activationRepository;
+    }
+
+    /**
+     * Plural alias for the activation repository.
+     * Sentinel::activations() === Sentinel::activation()
+     *
+     * @return ActivationRepositoryInterface|null
+     */
+    public static function activations(): ?ActivationRepositoryInterface {
+
+        return self::activation();
+    }
+
+    /**
+     * Helper (shortcut) for reaching the user repository (singular).
+     *
+     * @return UserRepositoryInterface|null
+     */
+    public static function user(): ?UserRepositoryInterface {
+
+        $inst = self::instance();
+
+        // Prefer the dedicated property if set
+        if ($inst->userRepository instanceof UserRepositoryInterface) {
+
+            return $inst->userRepository;
+        }
+
+        // Fallback to repositories bag
+        if (isset($inst->repositories['users']) && $inst->repositories['users'] instanceof UserRepositoryInterface) {
+
+            return $inst->repositories['users'];
+        }
+
+        // If a 'user' key is used instead of 'users'
+        if (isset($inst->repositories['user']) && $inst->repositories['user'] instanceof UserRepositoryInterface) {
+
+            return $inst->repositories['user'];
+        }
+
+        return null;
+    }
+
+    /**
+     * Plural alias for the user repository.
+     * Sentinel::users() === Sentinel::user()
+     *
+     * @return UserRepositoryInterface|null
+     */
+    public static function users(): ?UserRepositoryInterface {
+
+        return self::user();
+    }
+
+    /**
+     * Determine if the current visitor is NOT authenticated.
+     *
+     * @return bool
      */
     public static function guest(): bool {
 
-        $core = self::instance();
-
-        // UserRepository::check() returns UserInterface|null
-        $user = $core->userRepository->check();
-
-        return $user === null;
+        return self::check() === null;
     }
 
     /**
-     * Logout via the AuthManager service (static convenience).
+     * Log out the currently authenticated user.
      *
      * @return void
      */
     public static function logout(): void {
 
-        $core = self::instance();
+        $authManager = self::instance()->services['auth'] ?? null;
 
-        if (!$core->authManager) {
+        if ($authManager === null) {
 
-            throw new \RuntimeException('AuthManager service not available. Check NormalizeConfig/deploy wiring.');
+            throw new \RuntimeException('Auth service is not configured on Sentinel.');
         }
 
-        $core->authManager->logout();
+        $authManager->logout();
     }
 
     /**
-     * Internal logger helper (no-op if no logger is configured).
+     * Get the configured ActivationManager instance.
      *
-     * @param string $level
+     * This static helper returns the ActivationManager that was registered
+     * during Sentinel::deploy() via NormalizeConfig. It provides the activation
+     * API without adding any business logic to the Sentinel facade.
      *
-     * @param string $message
+     * @return ActivationManager
      *
-     * @param array  $context
-     *
-     * @return void
+     * @throws \RuntimeException When the activation manager is not configured.
      */
-    private function log($level, $message, array $context = []): void {
+    public static function activationManager(): ActivationManager {
 
-        if ($this->logger && method_exists($this->logger, $level)) {
+        $instance = self::instance();
 
-            $this->logger->{$level}($message, $context);
+        $manager = $instance->services['activation'] ?? null;
+
+        if ($manager === null) {
+
+            throw new \RuntimeException('Activation manager is not configured on Sentinel.');
         }
+
+        return $manager;
+    }
+
+    /**
+     * Activate a user by completing the pending activation record.
+     *
+     * This static helper resolves the user by the provided identifier and attempts
+     * to complete the activation using the configured ActivationRepository.
+     *
+     * Behavior:
+     * - Returns TRUE if a pending activation exists and was successfully completed.
+     * - Returns FALSE if the user cannot be resolved or no pending activation exists.
+     *
+     * Requirements:
+     * - The activation repository must be available under services['activations'],
+     *   as produced by NormalizeConfig() during Sentinel::deploy().
+     * - The user repository must implement findById().
+     *
+     * Common usage:
+     *
+     *     Sentinel::activateUser($userId);
+     *
+     * @param mixed $id
+     *         The user identifier (typically a primary key). Cast to int for
+     *         compatibility with common user-repository implementations.
+     * @param bool $remember
+     *
+     * @return bool
+     *         TRUE if activation was successfully completed; otherwise FALSE.
+     *
+     */
+    public static function activateUser($id, bool $remember = false): bool {
+
+        return self::activationManager()->activateUser($id, $remember);
+    }
+
+    /**
+     * Determine whether a pending activation exists for the given user.
+     *
+     * Resolves the user by identifier and returns TRUE when the activation
+     * repository reports an existing (not completed) activation record.
+     *
+     * @param  mixed $id
+     *         The user identifier (typically the primary key).
+     *
+     * @return bool
+     *         TRUE when a pending activation exists; otherwise FALSE.
+     *
+     * @throws \RuntimeException
+     *         When the activation or user repository is not configured, or the
+     *         activation repository does not implement the required methods.
+     */
+    public static function activationExists($id): bool {
+
+        return self::activationManager()->activationExists($id);
+    }
+
+    /**
+     * Resend (or recreate) an activation for the given user.
+     *
+     * Preferred behavior:
+     * - If the activation repository implements resend(UserInterface): bool,
+     *   this method will call it and return the result.
+     *
+     * Fallback behavior:
+     * - If resend() is not available but create(UserInterface) exists,
+     *   this helper will attempt to create (or recreate) a new activation row
+     *   and return TRUE on success. It assumes the repository or the caller
+     *   handles the actual notification delivery.
+     *
+     * @param  mixed $id
+     *         The user identifier (typically the primary key).
+     *
+     * @return bool
+     *         TRUE if the resend or recreation succeeded; otherwise FALSE.
+     *
+     * @throws \RuntimeException
+     *         When the activation or user repository is not configured and when
+     *         the activation repository supports neither resend() nor create().
+     */
+    public static function resendActivation($id): bool {
+
+        return self::activationManager()->resendActivation($id);
+    }
+
+    /**
+     * Get the configured AuthManager instance.
+     *
+     * This static helper provides direct access to the underlying authentication
+     * service (AuthManager) that powers methods like authenticate(), check(), and logout().
+     * It is useful when consumers need imperative access to lower-level operations
+     * (e.g., custom authentication flows, reusing validation helpers, or reading
+     * configuration-dependent behaviors) without re-wiring the service container.
+     *
+     * @return AuthManager
+     *
+     * @throws \RuntimeException
+     *         When the Auth service is not configured on Sentinel::deploy().
+     */
+    public static function auth(): AuthManager {
+
+        $instance = self::instance();
+
+        // All services are wired by NormalizeConfig::normalize(...) in deploy().
+        // The 'auth' key is expected to hold the AuthManager instance.
+        $authManager = $instance->services['auth'] ?? null;
+
+        if ($authManager === null) {
+
+            throw new \RuntimeException('Auth service is not configured on Sentinel.');
+        }
+
+        return $authManager;
+    }
+
+    /**
+     * Get the configured PSR-3 logger instance.
+     *
+     * This static helper returns the logger that was injected through
+     * Sentinel::deploy(). If no logger was configured, a Psr\Log\NullLogger
+     * instance is returned so that callers can safely log without additional
+     * null checks.
+     *
+     * Typical usage:
+     *
+     *   Sentinel::log()->info('Something happened', ['context' => 'value']);
+     *
+     * @return LoggerInterface
+     */
+    public static function log(): LoggerInterface {
+
+        $instance = self::instance();
+
+        if ($instance->logger instanceof LoggerInterface) {
+
+            return $instance->logger;
+        }
+
+        // Provide a fallback PSR-3 compliant logger.
+        $instance->logger = new NullLogger();
+
+        return $instance->logger;
+    }
+
+    /**
+     * Get the configured PermissionManager instance.
+     *
+     * This static helper provides direct access to the underlying permission
+     * service that manages permission definitions and evaluation rules. It allows
+     * consumers to retrieve the permission manager without manually accessing the
+     * internal services array created during Sentinel::deploy().
+     *
+     * Typical usage:
+     *
+     *   $permission = Sentinel::permission()->findBySlug('posts.publish');
+     *   $canPublish = Sentinel::permission()->userHasPermission($user, 'posts.publish');
+     *
+     * @return PermissionManager
+     *
+     * @throws \RuntimeException
+     *         When the permission service is not configured on Sentinel::deploy().
+     */
+    public static function permission(): PermissionManager {
+
+        $instance = self::instance();
+
+        $permissionManager = $instance->services['permissions'] ?? null;
+
+        if ($permissionManager === null) {
+
+            throw new \RuntimeException('Permission service is not configured on Sentinel.');
+        }
+
+        return $permissionManager;
+    }
+
+    /**
+     * Plural alias for the Permission Manager.
+     * Sentinel::permissions() === Sentinel::permission()
+     *
+     * @return PermissionManager
+     */
+    public static function permissions(): PermissionManager {
+
+        return self::permission();
+    }
+
+    /**
+     * Get the configured RoleManager instance.
+     *
+     * This static helper provides direct access to the underlying role service
+     * that manages role creation, updating and assignment. It allows consumers
+     * to retrieve the role manager without manually accessing the internal
+     * services array created during Sentinel::deploy().
+     *
+     * Typical usage:
+     *
+     *   Sentinel::role()->findByName('admin');
+     *   Sentinel::role()->assignRoleToUser($user, 'editor');
+     *
+     * @return RoleManager
+     *
+     * @throws \RuntimeException
+     *         When the role service is not configured on Sentinel::deploy().
+     */
+    public static function role(): RoleManager {
+
+        $instance = self::instance();
+
+        $roleManager = $instance->services['roles'] ?? null;
+
+        if ($roleManager === null) {
+
+            throw new \RuntimeException('Role service is not configured on Sentinel.');
+        }
+
+        return $roleManager;
+    }
+
+    /**
+     * Plural alias for the Role Manager.
+     * Sentinel::roles() === Sentinel::role()
+     *
+     * @return RoleManager
+     */
+    public static function roles(): RoleManager {
+
+        return self::role();
+    }
+
+    /**
+     * Get the underlying service array (advanced usage).
+     *
+     * @return array<string,mixed>
+     */
+    public static function services(): array {
+
+        return self::instance()->services;
     }
 }

@@ -6,6 +6,11 @@ use Element\Sentinel\Contracts\UserInterface;
 
 use Illuminate\Database\Eloquent\Model;
 
+use Illuminate\Database\Eloquent\Relations\{
+    BelongsToMany,
+    HasMany
+};
+
 /**
  * Eloquent model implementation for User records.
  */
@@ -25,6 +30,16 @@ class EloquentUser extends Model implements UserInterface {
     /** @var bool */
     public $timestamps = true;
 
+    /**
+     * Optionally cast boolean-like columns, if these are stored as tinyint(1).
+     *
+     * @var array<string,string>
+     */
+    protected $casts = [
+
+        'uuid' => 'string'
+    ];
+
     /** @return int|string|null */
     public function getId() {
 
@@ -41,5 +56,27 @@ class EloquentUser extends Model implements UserInterface {
     public function markActivated() {
 
         $this->is_activated = 1;
+    }
+
+    /**
+     * Many-to-many: roles for this user.
+     *
+     * @return BelongsToMany
+     */
+    public function roles(): BelongsToMany {
+
+        return $this->belongsToMany(\Element\Sentinel\Infrastructure\Eloquent\EloquentRole::class, 'users_roles', 'user_id', 'role_id');
+    }
+
+    /**
+     * One-to-many: permissions owned directly by this user (user-based).
+     *
+     * NOTE: The foreign key column on "permissions" is named "user".
+     *
+     * @return HasMany
+     */
+    public function permissions(): HasMany {
+
+        return $this->hasMany(\Element\Sentinel\Infrastructure\Eloquent\EloquentPermission::class, 'user');
     }
 }

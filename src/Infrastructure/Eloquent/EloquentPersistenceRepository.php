@@ -3,6 +3,7 @@
 namespace Element\Sentinel\Infrastructure\Eloquent;
 
 use Element\Sentinel\Contracts\PersistenceRepositoryInterface;
+
 use Element\Sentinel\Support\CodeGenerator;
 
 /**
@@ -34,23 +35,16 @@ class EloquentPersistenceRepository implements PersistenceRepositoryInterface {
     private $cookieSameSite;
 
     /**
-     * @param string      $cookieName
-     * @param int         $cookieLifetimeSeconds
-     * @param string      $cookiePath
+     * @param string $cookieName
+     * @param int $cookieLifetimeSeconds
+     * @param string $cookiePath
      * @param string|null $cookieDomain
-     * @param bool        $cookieSecure
-     * @param bool        $cookieHttpOnly
+     * @param bool|null $cookieSecure
+     * @param bool $cookieHttpOnly
      * @param string|null $cookieSameSite
      */
-    public function __construct(
-        $cookieName = 'element_sentinel',
-        $cookieLifetimeSeconds = 2592000, // 30 days
-        $cookiePath = '/',
-        $cookieDomain = null,
-        $cookieSecure = null,
-        $cookieHttpOnly = true,
-        $cookieSameSite = 'Lax'
-    ) {
+    public function __construct(string $cookieName = 'element_sentinel', int $cookieLifetimeSeconds = 2592000, string $cookiePath = '/', string $cookieDomain = null, bool   $cookieSecure = null, bool   $cookieHttpOnly = true, ?string $cookieSameSite = 'Lax') {
+
         $this->cookieName            = (string) $cookieName;
         $this->cookieLifetimeSeconds = (int) $cookieLifetimeSeconds;
         $this->cookiePath            = (string) $cookiePath;
@@ -130,6 +124,14 @@ class EloquentPersistenceRepository implements PersistenceRepositoryInterface {
 
         // Also clear current browser cookie if present
         $this->setCookie('', time() - 3600);
+    }
+
+    /**
+     * @return void
+     */
+    public function forget(): void {
+
+        $this->forgetCurrent();
     }
 
     /**

@@ -60,24 +60,24 @@ class EloquentActivationRepository implements ActivationRepositoryInterface {
     }
 
     /**
-     * @param string $activationCode
+     * @param string $code
      *
      * @return ActivationInterface|null
      */
-    public function findByCode($activationCode): ?ActivationInterface {
+    public function findByCode(string $code): ?ActivationInterface {
 
-        return EloquentActivation::query()->where('code', '=', $activationCode)->first();
+        return EloquentActivation::query()->where('code', '=', $code)->first();
     }
 
     /**
-     * @param UserInterface $userObject
-     * @param string        $activationCode
+     * @param UserInterface $user
+     * @param string $code
      *
      * @return bool
      */
-    public function complete(UserInterface $userObject, $activationCode): bool {
+    public function complete(UserInterface $user, string $code): bool {
 
-        $activationRecord = EloquentActivation::query()->where('user_id', '=', $userObject->getId())->where('code', '=', $activationCode)->whereNull('completed_at')->first();
+        $activationRecord = EloquentActivation::query()->where('user_id', '=', $user->getId())->where('code', '=', $code)->whereNull('completed_at')->first();
 
         if (!$activationRecord) {
 
@@ -89,11 +89,11 @@ class EloquentActivationRepository implements ActivationRepositoryInterface {
 
         $activationRecord->save();
 
-        $userObject->markActivated();
+        $user->markActivated();
 
-        if ($userObject instanceof EloquentUser) {
+        if ($user instanceof EloquentUser) {
 
-            $userObject->save();
+            $user->save();
         }
 
         return true;

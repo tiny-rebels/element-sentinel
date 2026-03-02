@@ -10,22 +10,60 @@ namespace Element\Sentinel\Contracts;
 interface UserRepositoryInterface {
 
     /**
-     * Find a user by primary key.
+     * Find a user by ID.
      *
-     * @param int|string $id
+     * @param int $id
+     * @param array $withRelations
      *
      * @return UserInterface|null
      */
-    public function findById($id): ?UserInterface;
+    public function findById(int $id, array $withRelations = []): ?UserInterface;
 
     /**
-     * Persist a user entity.
+     * Find a user by UUID.
      *
-     * @param UserInterface $user
+     * @param string $uuid
+     * @param array $withRelations
      *
-     * @return void
+     * @return UserInterface|null
      */
-    public function save(UserInterface $user);
+    public function findByUuid(string $uuid, array $withRelations = []): ?UserInterface;
+
+    /**
+     * Find a user by email.
+     *
+     * @param string $email
+     * @param array $withRelations
+     *
+     * @return UserInterface|null
+     */
+    public function findByEmail(string $email, array $withRelations = []): ?UserInterface;
+
+    /**
+     * Register a new user from a flat attributes array.
+     *
+     * Expected keys (adjust to your schema):
+     * - uuid (optional)
+     * - first_name
+     * - last_name
+     * - email (required)
+     * - password (required, plaintext)
+     * - activation_token (optional; auto-created when $activate === false if missing)
+     *
+     * Behavior:
+     * - Hashes the plaintext password before persistence.
+     * - If $activate === true: sets user as activated (and clears activation_token if present).
+     * - If $activate === false: ensures activation_token exists and sets activated = false.
+     *
+     * @param array $attributes  Associative array of user fields.
+     * @param bool $activate    Whether to mark the user as activated immediately. Default false.
+     *
+     * @return UserInterface
+     *
+     * @throws \InvalidArgumentException When required fields are missing (e.g., email/password).
+     * @throws \RuntimeException         When the user cannot be persisted.
+     */
+    public function register(array $attributes, bool $activate = false): UserInterface;
 
     /**
      * Check the current authentication state and return the authenticated user if available.
@@ -38,7 +76,9 @@ interface UserRepositoryInterface {
      * - This is framework-agnostic. Your application must set
      *   $_SESSION['sentinel_user_id'] after a successful login.
      *
+     * @param string[] $withRelations Optional list of relation method names to eager-load
+     *
      * @return UserInterface|null
      */
-    public function check(): ?UserInterface;
+    public function check(array $withRelations = []): ?UserInterface;
 }

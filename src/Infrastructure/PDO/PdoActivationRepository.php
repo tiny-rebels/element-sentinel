@@ -127,7 +127,7 @@ class PdoActivationRepository implements ActivationRepositoryInterface {
      *
      * @return ActivationInterface|null
      */
-    public function findByCode($code): ?ActivationInterface {
+    public function findByCode(string $code): ?ActivationInterface {
 
         $sql = "SELECT id, user_id, code, completed_at, created_at
                 FROM {$this->table}
@@ -155,14 +155,14 @@ class PdoActivationRepository implements ActivationRepositoryInterface {
      * returnerer false, hvis der ikke findes en åben activation.
      *
      * @param UserInterface $user
-     * @param string        $code
+     * @param string $code
      *
      * @return bool
      */
-    public function complete(UserInterface $user, $code): bool {
+    public function complete(UserInterface $user, string $code): bool {
 
         // En simpel og sikker måde er at opdatere med en single UPDATE ... WHERE user_id, code AND completed_at IS NULL
-        $sql = "UPDATE {$this->table}                
+        $sql = "UPDATE {$this->table}
                 SET completed = :completed,
                     completed_at = :completed_at
                 WHERE user_id = :user_id
