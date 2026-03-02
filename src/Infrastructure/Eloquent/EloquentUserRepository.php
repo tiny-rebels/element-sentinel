@@ -2,11 +2,11 @@
 
 namespace Element\Sentinel\Infrastructure\Eloquent;
 
-use Element\Sentinel\Contracts\{
+use Element\Sentinel\Contracts\{ActivationRepositoryInterface,
+    PasswordHasherInterface,
     PersistenceRepositoryInterface,
     UserInterface,
-    UserRepositoryInterface
-};
+    UserRepositoryInterface};
 
 use Element\Sentinel\Services\Exceptions\Auth\RelationsNotSupportedException;
 
@@ -27,6 +27,9 @@ class EloquentUserRepository implements UserRepositoryInterface {
     /** @var string */
     private $userModelClass;
 
+    /** @var ActivationRepositoryInterface */
+    private $activationsRepository;
+
     /** @var PersistenceRepositoryInterface|null */
     private $persistenceRepository;
 
@@ -41,19 +44,25 @@ class EloquentUserRepository implements UserRepositoryInterface {
     private $honorRuntimeRelations;
 
     /**
-     * @param string                              $userModelClass
+     * @param string $userModelClass
+     * @param ActivationRepositoryInterface|null $activationsRepository
      * @param PersistenceRepositoryInterface|null $persistenceRepository
-     * @param string[]                            $defaultEagerRelations
-     * @param bool                                $honorRuntimeRelations
+     * @param PasswordHasherInterface $passwordHasher
+     * @param string[] $defaultEagerRelations
+     * @param bool $honorRuntimeRelations
      */
     public function __construct(
         string $userModelClass,
+        ?ActivationRepositoryInterface $activationsRepository = null,
         ?PersistenceRepositoryInterface $persistenceRepository = null,
+        PasswordHasherInterface $passwordHasher,
         array $defaultEagerRelations = [],
         bool $honorRuntimeRelations = true
     ) {
         $this->userModelClass        = $userModelClass;
+        $this->activationsRepository = $activationsRepository;
         $this->persistenceRepository = $persistenceRepository;
+        $this->passwordHasher        = $passwordHasher;
         $this->defaultEagerRelations = $defaultEagerRelations;
         $this->honorRuntimeRelations = $honorRuntimeRelations;
     }
@@ -117,22 +126,118 @@ class EloquentUserRepository implements UserRepositoryInterface {
     }
 
     /**
-     * Save a user entity.
+     * Register a new user from a flat attributes array.
+     * + create activation record + optionally complete activation.
      *
-     * @param UserInterface $userObject
+     * Required keys:
+     *  - email (string)
+     *  - password (string, plaintext)
+     *  - activation_token (string)         Note! required only when $activate === false
      *
-     * @return void
+     * Optional keys (adjust to your schema):
+     *  - uuid, first_name, last_name, is_activated
+     *
+     * @param array $attributes
+     * @param bool $activate
+     *
+     * @return UserInterface
+     *
+     * @throws \InvalidArgumentException
+     * @throws \RuntimeException
      */
-    public function save(UserInterface $userObject): void {
+    public function register(array $attributes, bool $activate = false): UserInterface {
 
-        if ($userObject instanceof $this->userModelClass) {
+        // 1) Validate basic fields
+        $email    = isset($attributes['email']) ? (string) $attributes['email'] : '';
+        $password = isset($attributes['password']) ? (string) $attributes['password'] : '';
 
-            $userObject->save();
+        if ($email === '' || $password === '') {
 
-            return;
+            throw new \InvalidArgumentException('Missing required fields: email and/or password.');
         }
 
-        $this->updateNonEloquentUser($userObject);
+        // UI-token required when not activating immediately
+        if (!$activate) {
+
+            if (!isset($attributes['activation_token']) || (string) $attributes['activation_token'] === '') {
+
+                throw new \InvalidArgumentException(
+                    'activation_token is required when $activate is false.'
+                );
+            }
+        }
+
+        /** @var \Illuminate\Database\Eloquent\Model|\Element\Sentinel\Contracts\UserInterface $user */
+        $userClass = $this->userModelClass;
+
+        // 2) Wrap all operations in a DB transaction (safe)
+        return \Illuminate\Database\Capsule\Manager::connection()->transaction(function () use ($userClass, $attributes, $email, $password, $activate) {
+
+            $user = new $userClass();
+
+            // ---- Set core attributes
+            if (isset($attributes['uuid']) && $attributes['uuid'] !== '') {
+
+                $user->uuid = (string) $attributes['uuid'];
+            }
+
+            $user->first_name = isset($attributes['first_name']) ? (string) $attributes['first_name'] : null;
+            $user->last_name  = isset($attributes['last_name'])  ? (string) $attributes['last_name']  : null;
+            $user->email      = $email;
+
+            // ---- Hash password using your configured hasher
+            if (!isset($this->passwordHasher) || !method_exists($this->passwordHasher, 'hash')) {
+
+                throw new \RuntimeException('Password hasher is not configured or missing hash() method.');
+            }
+
+            $user->password = (string) $this->passwordHasher->hash($password);
+
+            // ---- activation_token (UI OTP)
+            if ($activate) {
+
+                $user->activation_token = null;
+                $user->is_activated = 1;
+
+            } else {
+
+                $user->activation_token = (string) $attributes['activation_token'];
+                $user->is_activated = 0;
+            }
+
+            if (!$user->save()) {
+
+                throw new \RuntimeException('User could not be saved.');
+            }
+
+            //
+            // 3) Create activation row in `activations` (ALWAYS)
+            //
+            // Your ActivationRepository generates its own internal activation `code`
+            // via CodeGenerator::random(32).
+            //
+            /** @var ActivationInterface $activation */
+            $activation = $this->activationsRepository->create($user);
+
+            //
+            // 4) Complete activation immediately if requested
+            //
+            if ($activate) {
+
+                $this->activationsRepository->complete($user, $activation->code);
+
+                // Clear UI-token (just to keep user-row clean)
+                if ($user->activation_token !== null) {
+
+                    $user->activation_token = null;
+
+                    $user->save();
+                }
+            }
+
+            // done
+            return $user;
+        });
     }
 
     /**

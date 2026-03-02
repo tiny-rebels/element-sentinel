@@ -252,6 +252,188 @@ final class AuthManager {
     }
 
     /**
+     * Validate a user's credentials without performing a login.
+     *
+     * This method performs a read-only credential check using the configured
+     * CredentialsRepositoryInterface and PasswordHasherInterface. It does NOT
+     * establish any authentication state (no session/remember-me), and it does
+     * NOT run the activation checkpoint. These responsibilities remain in
+     * authenticate().
+     *
+     * Flow:
+     * 1) Optional throttle pre-check on IP scope (no user identity yet).
+     * 2) Resolve the user by email using the credentials repository.
+     * 3) Verify the provided password using the configured hasher.
+     * 4) Optional transparent password rehash on success (if supported by the repository).
+     * 5) Throttle accounting:
+     *    - Unknown user → hit IP scope.
+     *    - Invalid password → hit IP and user scopes.
+     *    - Success → clear IP and user scopes.
+     *
+     * Return semantics:
+     * - Returns TRUE when the email exists and the password matches.
+     * - Returns FALSE otherwise.
+     *
+     * Side effects:
+     * - May perform throttle hits/clear as described above.
+     * - May rehash and persist the password when the repository supports it and
+     *   the hasher indicates that rehash is needed.
+     *
+     * @param string $email
+     *        The login identifier. In the Eloquent adapter this is strictly the user's email address.
+     * @param string $password
+     *        The plaintext password provided by the caller.
+     * @param \Element\Sentinel\Contracts\UserInterface|null $authenticatedUser
+     *        Output parameter. On success, this will be set to the resolved user instance.
+     *        On failure, it will remain NULL.
+     *
+     * @return bool
+     *         TRUE if the provided credentials are valid; otherwise FALSE.
+     */
+    public function validateCredentials(string $email, string $password,?UserInterface &$authenticatedUser = null): bool {
+
+        $authenticatedUser = null;
+
+        // Resolve caller IP address in a defensive way
+        $ipAddress = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '0.0.0.0';
+
+        // (1) Throttle pre-check (IP-only; no user identity known yet)
+        // Mirror the pattern already used in authenticate()
+        foreach ($this->orderedCheckpoints as $checkpoint) {
+
+            if ($checkpoint instanceof \Element\Sentinel\Services\Security\ThrottleCheckpoint) {
+
+                $checkpoint->check(null, $ipAddress);
+            }
+        }
+
+        // (2) Attempt to locate the user by email via the credentials repository
+        $user = $this->credentialsRepository->find($email);
+
+        if (!$user instanceof UserInterface) {
+
+            // Unknown identity → throttle hit at IP scope and return false
+            $this->throttleCheckpoint->hit(null, $ipAddress);
+
+            if ($this->logger) {
+
+                $this->logger->info('Credential validation failed: user not found', [
+
+                    'email'      => $email,
+                    'ip_address' => $ipAddress,
+                ]);
+            }
+
+            return false;
+        }
+
+        // (3) Verify the password using the configured hasher.
+        // Prefer a descriptive method name if available; fall back to the generic one.
+        $isPasswordValid = false;
+        if (method_exists($this->credentialsRepository, 'verifyPassword')) {
+
+            // Signature: verifyPassword(UserInterface $user, string $plainPassword, PasswordHasherInterface $hasher): bool
+            $isPasswordValid = (bool) $this->credentialsRepository->verifyPassword($user, $password, $this->passwordHasher);
+
+        } elseif (method_exists($this->credentialsRepository, 'verify')) {
+
+            // Signature: verify(UserInterface $user, string $plainPassword, PasswordHasherInterface $hasher): bool
+            $isPasswordValid = (bool) $this->credentialsRepository->verify($user, $password, $this->passwordHasher);
+
+        } else {
+
+            // Repository does not expose a verification API — treat as invalid for safety.
+            if ($this->logger) {
+
+                $this->logger->warning('Credentials repository does not implement a known verify method.');
+            }
+
+            // Count the attempt to user + IP scopes since we did resolve a user
+            $this->throttleCheckpoint->hit((string) $user->getId(), $ipAddress);
+
+            return false;
+        }
+
+        if (!$isPasswordValid) {
+
+            // Wrong password → throttle hit for both IP and user
+            $this->throttleCheckpoint->hit((string) $user->getId(), $ipAddress);
+
+            if ($this->logger) {
+
+                $this->logger->info('Credential validation failed: invalid password', [
+
+                    'user_id'    => $user->getId(),
+                    'email'      => $email,
+                    'ip_address' => $ipAddress,
+                ]);
+            }
+
+            return false;
+        }
+
+        // (4) Optional: transparent rehash on success if the repository supports it.
+        // We only attempt this when a getter is available, to avoid coupling.
+        try {
+
+            $storedPasswordHash = null;
+
+            if (method_exists($this->credentialsRepository, 'getPasswordHash')) {
+
+                $storedPasswordHash = (string) $this->credentialsRepository->getPasswordHash($user);
+            }
+
+            if (is_string($storedPasswordHash) && $storedPasswordHash !== '' && method_exists($this->passwordHasher, 'needsRehash') && $this->passwordHasher->needsRehash($storedPasswordHash) && method_exists($this->credentialsRepository, 'updatePassword')) {
+
+                $newPasswordHash = (string) $this->passwordHasher->hash($password);
+                $this->credentialsRepository->updatePassword($user, $newPasswordHash);
+
+                // Persist immediately when the user is an Eloquent model
+                if ($user instanceof \Illuminate\Database\Eloquent\Model) {
+
+                    $user->save();
+                }
+
+                if ($this->logger) {
+
+                    $this->logger->info('Password hash transparently rehashed during validation', [
+
+                        'user_id' => $user->getId(),
+                    ]);
+                }
+            }
+
+        } catch (\Throwable $rehashError) {
+
+            // Never fail the credential validation due to rehash issues; log for diagnostics only.
+            if ($this->logger) {
+
+                $this->logger->warning('Password rehash failed during credential validation', [
+
+                    'user_id' => $user->getId(),
+                    'error'   => $rehashError->getMessage(),
+                ]);
+            }
+        }
+
+        // (5) Success → clear throttle counters and output the resolved user
+        $this->throttleCheckpoint->clear((string) $user->getId(), $ipAddress);
+        $authenticatedUser = $user;
+
+        if ($this->logger) {
+
+            $this->logger->info('Credential validation succeeded', [
+
+                'user_id'    => $user->getId(),
+                'email'      => $email,
+                'ip_address' => $ipAddress,
+            ]);
+        }
+
+        return true;
+    }
+
+    /**
      * Logout the currently authenticated user.
      *
      * @return void

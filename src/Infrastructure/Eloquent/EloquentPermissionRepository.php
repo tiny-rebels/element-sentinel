@@ -59,7 +59,7 @@ class EloquentPermissionRepository implements PermissionRepositoryInterface {
         string $userModelClass,
         string $permissionUserPivotTable = 'permission_user',
         string $permissionRolePivotTable = 'permission_role',
-        string $roleUserPivotTable = 'role_user',
+        string $roleUserPivotTable = 'users_roles',
         string $userForeignKey = 'user_id',
         string $roleForeignKey = 'role_id',
         string $permissionForeignKey = 'permission_id'

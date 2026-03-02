@@ -40,13 +40,30 @@ interface UserRepositoryInterface {
     public function findByEmail(string $email, array $withRelations = []): ?UserInterface;
 
     /**
-     * Persist a user entity.
+     * Register a new user from a flat attributes array.
      *
-     * @param UserInterface $user
+     * Expected keys (adjust to your schema):
+     * - uuid (optional)
+     * - first_name
+     * - last_name
+     * - email (required)
+     * - password (required, plaintext)
+     * - activation_token (optional; auto-created when $activate === false if missing)
      *
-     * @return void
+     * Behavior:
+     * - Hashes the plaintext password before persistence.
+     * - If $activate === true: sets user as activated (and clears activation_token if present).
+     * - If $activate === false: ensures activation_token exists and sets activated = false.
+     *
+     * @param array $attributes  Associative array of user fields.
+     * @param bool $activate    Whether to mark the user as activated immediately. Default false.
+     *
+     * @return UserInterface
+     *
+     * @throws \InvalidArgumentException When required fields are missing (e.g., email/password).
+     * @throws \RuntimeException         When the user cannot be persisted.
      */
-    public function save(UserInterface $user);
+    public function register(array $attributes, bool $activate = false): UserInterface;
 
     /**
      * Check the current authentication state and return the authenticated user if available.

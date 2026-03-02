@@ -150,13 +150,24 @@ final class Builder {
             );
         }
 
-        return new Sentinel(
-            $this->userRepository,
-            $this->activationRepository,
-            $this->persistenceRepository,
-            $this->passwordHasher,
-            $this->logger,
-            $this->credentialsRepository
-        );
+        // 1) Build an input-config array that NormalizeConfig understands.
+        $inputConfiguration = [
+            'sentinel' => [
+                'adapter'    => 'eloquent',
+                'hasher'     => 'native', // eller en konkret konfiguration/instance, afhænger af dit setup
+                'models'     => [
+                    'users'       => ['class' => \Element\Sentinel\Infrastructure\Eloquent\EloquentUser::class],
+                    'roles'       => ['class' => \Element\Sentinel\Infrastructure\Eloquent\EloquentRole::class],
+                    'permissions' => ['class' => \Element\Sentinel\Infrastructure\Eloquent\EloquentPermission::class],
+                ],
+                // ... possibly remember/throttling/activations etc.
+            ],
+        ];
+
+        // 2) Deploy (gather services, repos, logger) via NormalizeConfig
+        Sentinel::deploy($inputConfiguration);
+
+        // 3) Returns the singleton-instance
+        return Sentinel::instance();
     }
 }

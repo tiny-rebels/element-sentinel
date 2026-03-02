@@ -18,6 +18,7 @@ use Element\Sentinel\Infrastructure\Eloquent\{
 use Element\Sentinel\Infrastructure\Policies\ThrottlePolicy;
 
 use Element\Sentinel\Services\{
+    ActivationManager,
     AuthManager,
     LogManager,
     PermissionManager,
@@ -41,20 +42,17 @@ final class NormalizeConfig {
      * Normalize any supported input into the canonical deploy array.
      *
      * @param array $inputConfiguration
-     *
      * @return array
      */
     public static function normalize(array $inputConfiguration): array {
 
         $rawConfiguration = self::extractArray($inputConfiguration);
 
-        // Preferred top-level section is "sentinel"; fallback to "auth" or root.
-        $configuration = (isset($rawConfiguration['sentinel']) && is_array($rawConfiguration['sentinel']))
-            ? $rawConfiguration['sentinel']
-            : ((isset($rawConfiguration['auth']) && is_array($rawConfiguration['auth'])) ? $rawConfiguration['auth'] : $rawConfiguration);
+        // Preferred wrap-key: "sentinel".
+        $configuration = (isset($rawConfiguration['sentinel']) && is_array($rawConfiguration['sentinel'])) ? $rawConfiguration['sentinel'] : ((isset($rawConfiguration['auth']) && is_array($rawConfiguration['auth'])) ? $rawConfiguration['auth'] : $rawConfiguration);
 
         /*
-         * 1) Adapter → repositories
+         * Select adapter
          */
         $adapterName = isset($configuration['adapter']) ? strtolower((string) $configuration['adapter']) : 'eloquent';
 
@@ -63,43 +61,42 @@ final class NormalizeConfig {
             case 'eloquent':
 
                 /*
-                 * Remember‑me cookie configuration
+                 * A) Build password hasher FIRST
                  */
-                $cookieName = isset($configuration['cookie']) ? (string) $configuration['cookie'] : 'element_sentinel';
-
-                $rememberSection = (isset($configuration['remember']) && is_array($configuration['remember']))
-                    ? $configuration['remember']
-                    : [];
-
-                $lifetimeSeconds = isset($rememberSection['lifetime_seconds']) ? (int) $rememberSection['lifetime_seconds'] : (60 * 60 * 24 * 30);
-                $cookiePath      = isset($rememberSection['path'])      ? (string) $rememberSection['path']      : '/';
-                $cookieDomain    = isset($rememberSection['domain'])    ? (string) $rememberSection['domain']    : null;
-                $cookieSecure    = array_key_exists('secure', $rememberSection) ? (bool) $rememberSection['secure'] : null;
-                $cookieHttpOnly  = !array_key_exists('http_only', $rememberSection) || (bool) $rememberSection['http_only'];
-                $cookieSameSite  = isset($rememberSection['same_site']) ? (string) $rememberSection['same_site'] : 'Lax';
+                $hasherRaw              = $configuration['hasher'] ?? 'native';
+                $passwordHasher         = NativePasswordHasher::resolveHasher($hasherRaw);
 
                 /*
-                 * User model (pluggable) — NO relations from YAML
+                 * B) Remember‑me cookie config
                  */
-                $userModelClass = (isset($configuration['models']['users']['class']) && is_string($configuration['models']['users']['class']))
-                    ? $configuration['models']['users']['class']
-                    : EloquentUser::class;
+                $cookieName             = isset($configuration['cookie']) ? (string) $configuration['cookie'] : 'element_sentinel';
 
-                // Validator and NativePasswordHasher are in the same namespace (Support), so no import is required.
+                $rememberSection        = (isset($configuration['remember']) && is_array($configuration['remember'])) ? $configuration['remember'] : [];
+
+                $lifetimeSeconds        = isset($rememberSection['lifetime_seconds']) ? (int) $rememberSection['lifetime_seconds'] : (60 * 60 * 24 * 30);
+
+                $cookiePath             = isset($rememberSection['path']) ? (string) $rememberSection['path'] : '/';
+                $cookieDomain           = isset($rememberSection['domain']) ? (string) $rememberSection['domain'] : null;
+                $cookieSecure           = array_key_exists('secure', $rememberSection) ? (bool)$rememberSection['secure'] : null;
+                $cookieHttpOnly         = !array_key_exists('http_only', $rememberSection) || (bool) $rememberSection['http_only'];
+                $cookieSameSite         = isset($rememberSection['same_site']) ? (string) $rememberSection['same_site'] : 'Lax';
+
+                /*
+                 * C) User model
+                 */
+                $userModelClass         = (isset($configuration['models']['users']['class']) && is_string($configuration['models']['users']['class'])) ? $configuration['models']['users']['class'] : EloquentUser::class;
+
                 Validator::validateUserModel($userModelClass);
 
-                // No YAML relations → intentionally empty
-                $defaultEagerRelations = [];
-
-                // Only honor runtime withRelations when using the standard EloquentUser
-                $honorRuntimeRelations = ($userModelClass === EloquentUser::class);
+                $defaultEagerRelations  = [];
+                $honorRuntimeRelations  = ($userModelClass === EloquentUser::class);
 
                 /*
-                 * Persistence repository (remember‑me)
+                 * D) Persistence repository (remember-me)
                  */
                 $persistencesRepository = new EloquentPersistenceRepository(
                     $cookieName,
-                    (int) $lifetimeSeconds,
+                    $lifetimeSeconds,
                     $cookiePath,
                     $cookieDomain,
                     $cookieSecure,
@@ -108,44 +105,53 @@ final class NormalizeConfig {
                 );
 
                 /*
-                 * Users repository
+                 * E) Activation repository
+                 */
+                $activationsRepository = new EloquentActivationRepository();
+
+                /*
+                 * F) User repository — MUST match constructor:
+                 *
+                 * __construct(
+                 *   string $userModelClass,
+                 *   ?ActivationRepositoryInterface $activationsRepository,
+                 *   ?PersistenceRepositoryInterface $persistenceRepository,
+                 *   PasswordHasherInterface $passwordHasher,
+                 *   array $defaultEagerRelations,
+                 *   bool $honorRuntimeRelations
+                 * )
                  */
                 $usersRepository = new EloquentUserRepository(
                     $userModelClass,
+                    $activationsRepository,
                     $persistencesRepository,
+                    $passwordHasher,
                     $defaultEagerRelations,
                     $honorRuntimeRelations
                 );
 
                 /*
-                 * Activations
-                 */
-                $activationsRepository = new EloquentActivationRepository();
-
-                /*
-                 * Credentials (email‑only, pluggable model)
+                 * G) Credentials repository
                  */
                 $credentialsRepository = new EloquentCredentialsRepository(
                     $userModelClass,
-                    [] // no default eager relations
+                    [] // default eager-relations (none)
                 );
 
                 /*
-                 * Roles (pluggable)
+                 * H) Roles
                  */
-                $rolesConfiguration = (isset($configuration['models']['roles']) && is_array($configuration['models']['roles']))
-                    ? $configuration['models']['roles']
-                    : [];
+                $rolesConfiguration = (isset($configuration['models']['roles']) && is_array($configuration['models']['roles'])) ? $configuration['models']['roles'] : [];
 
-                $roleModelClass = (isset($rolesConfiguration['class']) && is_string($rolesConfiguration['class']))
-                    ? $rolesConfiguration['class']
-                    : EloquentRole::class;
+                $roleModelClass     = (isset($rolesConfiguration['class']) && is_string($rolesConfiguration['class'])) ? $rolesConfiguration['class'] : EloquentRole::class;
 
                 Validator::validateRoleModel($roleModelClass);
 
-                $rolePivotTable = isset($rolesConfiguration['pivot'])    ? (string) $rolesConfiguration['pivot']    : 'role_user';
-                $roleUserKey    = isset($rolesConfiguration['user_key']) ? (string) $rolesConfiguration['user_key'] : 'user_id';
-                $roleRoleKey    = isset($rolesConfiguration['role_key']) ? (string) $rolesConfiguration['role_key'] : 'role_id';
+                $rolePivotTable     = isset($rolesConfiguration['pivot']) ? (string) $rolesConfiguration['pivot'] : 'users_roles';
+
+                $roleUserKey        = isset($rolesConfiguration['user_key']) ? (string) $rolesConfiguration['user_key'] : 'user_id';
+
+                $roleRoleKey        = isset($rolesConfiguration['role_key']) ? (string) $rolesConfiguration['role_key'] : 'role_id';
 
                 $rolesRepository = new EloquentRoleRepository(
                     $roleModelClass,
@@ -158,23 +164,23 @@ final class NormalizeConfig {
                 $automaticallyCreateMissingRoles = !isset($configuration['roles']['auto_create']) || (bool)$configuration['roles']['auto_create'];
 
                 /*
-                 * Permissions (pluggable) — user-based column "user" (hasMany) + role pivot (permission_role)
+                 * I) Permissions
                  */
-                $permissionsConfiguration = (isset($configuration['models']['permissions']) && is_array($configuration['models']['permissions']))
-                    ? $configuration['models']['permissions']
-                    : [];
+                $permissionsConfiguration   = (isset($configuration['models']['permissions']) && is_array($configuration['models']['permissions'])) ? $configuration['models']['permissions'] : [];
 
-                $permissionModelClass = (isset($permissionsConfiguration['class']) && is_string($permissionsConfiguration['class']))
-                    ? $permissionsConfiguration['class']
-                    : EloquentPermission::class;
+                $permissionModelClass       = (isset($permissionsConfiguration['class']) && is_string($permissionsConfiguration['class'])) ? $permissionsConfiguration['class'] : EloquentPermission::class;
 
                 Validator::validatePermissionModel($permissionModelClass);
 
-                $permissionRolePivotTable = isset($permissionsConfiguration['role_pivot'])      ? (string) $permissionsConfiguration['role_pivot']      : 'permission_role';
-                $roleUserPivotTable       = isset($rolesConfiguration['pivot'])                 ? (string) $rolesConfiguration['pivot']                 : 'role_user';
-                $permissionUserForeignKey = isset($permissionsConfiguration['user_key'])        ? (string) $permissionsConfiguration['user_key']        : 'user';
-                $permissionRoleForeignKey = isset($permissionsConfiguration['role_key'])        ? (string) $permissionsConfiguration['role_key']        : 'role_id';
-                $permissionForeignKey     = isset($permissionsConfiguration['permission_key'])  ? (string) $permissionsConfiguration['permission_key']  : 'permission_id';
+                $permissionRolePivotTable   = isset($permissionsConfiguration['role_pivot']) ? (string) $permissionsConfiguration['role_pivot'] : 'permission_role';
+
+                $roleUserPivotTable         = isset($rolesConfiguration['pivot']) ? (string) $rolesConfiguration['pivot'] : 'users_roles';
+
+                $permissionUserForeignKey   = isset($permissionsConfiguration['user_key']) ? (string) $permissionsConfiguration['user_key'] : 'user';
+
+                $permissionRoleForeignKey   = isset($permissionsConfiguration['role_key']) ? (string) $permissionsConfiguration['role_key'] : 'role_id';
+
+                $permissionForeignKey       = isset($permissionsConfiguration['permission_key']) ? (string) $permissionsConfiguration['permission_key'] : 'permission_id';
 
                 $permissionsRepository = new EloquentPermissionRepository(
                     $permissionModelClass,
@@ -186,29 +192,24 @@ final class NormalizeConfig {
                     $permissionForeignKey
                 );
 
-                $automaticallyCreateMissingPermissions = !isset($configuration['permissions']['auto_create']) || (bool)$configuration['permissions']['auto_create'];
+                $automaticallyCreateMissingPermissions = !isset($configuration['permissions']['auto_create'])  || (bool)$configuration['permissions']['auto_create'];
 
                 /*
-                 * Throttling (global/ip/user) + Checkpoints
-                 * YAML examples under: sentinel.throttling and sentinel.checkpoints
+                 * J) Throttling
                  */
-                $throttlingConfig = isset($configuration['throttling']) && is_array($configuration['throttling'])
-                    ? $configuration['throttling']
-                    : [];
+                $throttlingConfig = (isset($configuration['throttling']) && is_array($configuration['throttling'])) ? $configuration['throttling'] : [];
 
-                // Helper to build a ThrottlePolicy per scope (with suspension_seconds)
-                $buildPolicy = function (array $cfg, string $scope, int $defaultInterval, $defaultThresholds, int $defaultSuspensionSeconds) {
+                $buildPolicy = function (array $cfg, $scope, $defaultInterval, $defaultThresholds, $defaultSuspensionSeconds) {
+
                     $scopeCfg   = isset($cfg[$scope]) && is_array($cfg[$scope]) ? $cfg[$scope] : [];
-                    $interval   = isset($scopeCfg['interval']) ? (int) $scopeCfg['interval'] : $defaultInterval;
+                    $interval   = isset($scopeCfg['interval']) ? (int)$scopeCfg['interval'] : $defaultInterval;
                     $thresholds = $scopeCfg['thresholds'] ?? $defaultThresholds;
-                    $suspension = isset($scopeCfg['suspension_seconds']) ? (int) $scopeCfg['suspension_seconds'] : $defaultSuspensionSeconds;
 
-                    // Note: for map-thresholds (e.g., global), ThrottlePolicy resolves suspension from the map (minutes→seconds),
-                    // and this $suspension value is effectively ignored.
+                    $suspension = isset($scopeCfg['suspension_seconds']) ? (int)$scopeCfg['suspension_seconds'] : $defaultSuspensionSeconds;
+
                     return new ThrottlePolicy($interval, $thresholds, $suspension);
                 };
 
-                // Your YAML example: global has a map (attempts => minutes), ip/user use integers
                 $globalPolicy = $buildPolicy($throttlingConfig, 'global', 900, [], 60);
                 $ipPolicy     = $buildPolicy($throttlingConfig, 'ip',     900, 5,  60);
                 $userPolicy   = $buildPolicy($throttlingConfig, 'user',   900, 5,  60);
@@ -220,82 +221,82 @@ final class NormalizeConfig {
                     $userPolicy
                 );
 
-                // Checkpoints list from YAML (ordered). Default: throttle + activation
+                /*
+                 * K) Checkpoints
+                 */
                 $checkpointsList = [];
 
                 if (isset($configuration['checkpoints']) && is_array($configuration['checkpoints'])) {
 
-                    foreach ($configuration['checkpoints'] as $cp) {
+                    foreach ($configuration['checkpoints'] as $cpName) {
 
-                        if (is_string($cp)) {
+                        if (is_string($cpName) && trim($cpName) !== '') {
 
-                            $name = trim($cp);
-
-                            if ($name !== '') {
-
-                                $checkpointsList[] = strtolower($name);
-                            }
+                            $checkpointsList[] = strtolower(trim($cpName));
                         }
                     }
                 }
 
-                $throttleCheckpointEnabled = in_array('throttle', $checkpointsList, true) || empty($checkpointsList);
-                $throttleCheckpoint        = new ThrottleCheckpoint($throttleRepository, $throttleCheckpointEnabled);
+                $throttleCheckpointEnabled      = empty($checkpointsList) || in_array('throttle', $checkpointsList, true);
 
-                // Activation policy (expires + lottery)
-                $activationsCfg         = (isset($configuration['activations']) && is_array($configuration['activations'])) ? $configuration['activations'] : [];
-                $activationExpires      = isset($activationsCfg['expires']) ? (int) $activationsCfg['expires'] : 0; // 0 = never expires
-                $activationLotteryArray = (isset($activationsCfg['lottery']) && is_array($activationsCfg['lottery'])) ? $activationsCfg['lottery'] : [0, 0];
+                $activationCheckpointEnabled    = empty($checkpointsList) || in_array('activation', $checkpointsList, true);
 
-                $activationLotteryNumerator   = isset($activationLotteryArray[0]) ? (int) $activationLotteryArray[0] : 0;
-                $activationLotteryDenominator = isset($activationLotteryArray[1]) ? (int) $activationLotteryArray[1] : 0;
+                $throttleCheckpoint = new ThrottleCheckpoint($throttleRepository, $throttleCheckpointEnabled);
 
-                // Minimal activation policy value-object
-                $activationPolicy = new class($activationExpires, $activationLotteryNumerator, $activationLotteryDenominator) {
+                /*
+                 * Activation policy (expires + lottery)
+                 */
+                $activationsCfg = (isset($configuration['activations']) && is_array($configuration['activations'])) ? $configuration['activations'] : [];
 
-                    /** @var int */
-                    private $expirationSeconds;
-                    /** @var int */
-                    private $lotteryNumerator;
-                    /** @var int */
-                    private $lotteryDenominator;
+                $activationExpires = isset($activationsCfg['expires']) ? (int)$activationsCfg['expires'] : 0;
 
-                    public function __construct(int $expirationSeconds, int $lotteryNumerator, int $lotteryDenominator) {
+                $lotteryArr = isset($activationsCfg['lottery']) && is_array($activationsCfg['lottery']) ? $activationsCfg['lottery'] : [0, 0];
 
-                        $this->expirationSeconds   = $expirationSeconds;
-                        $this->lotteryNumerator    = $lotteryNumerator;
-                        $this->lotteryDenominator  = $lotteryDenominator;
+                $lotNum = isset($lotteryArr[0]) ? (int)$lotteryArr[0] : 0;
+                $lotDen = isset($lotteryArr[1]) ? (int)$lotteryArr[1] : 0;
+
+                $activationPolicy = new class($activationExpires, $lotNum, $lotDen) {
+
+                    private $exp, $ln, $ld;
+
+                    public function __construct($exp, $ln, $ld) {
+
+                        $this->exp = $exp;
+                        $this->ln  = $ln;
+                        $this->ld  = $ld;
                     }
 
-                    public function expirationSeconds(): int { return $this->expirationSeconds; }
-                    public function lotteryNumerator(): int  { return $this->lotteryNumerator; }
-                    public function lotteryDenominator(): int { return $this->lotteryDenominator; }
+                    public function expirationSeconds() { return $this->exp; }
+                    public function lotteryNumerator()  { return $this->ln; }
+                    public function lotteryDenominator(){ return $this->ld; }
+
                     public function shouldRunLottery(): bool {
 
-                        if ($this->lotteryDenominator <= 0 || $this->lotteryNumerator <= 0) {
+                        if ($this->ld <= 0 || $this->ln <= 0) {
 
                             return false;
                         }
 
-                        return mt_rand(1, $this->lotteryDenominator) <= $this->lotteryNumerator;
+                        return mt_rand(1, $this->ld) <= $this->ln;
                     }
                 };
 
-                $activationCheckpointEnabled = in_array('activation', $checkpointsList, true) || empty($checkpointsList);
-                $activationCheckpoint        = new ActivationCheckpoint($activationCheckpointEnabled);
+                $activationCheckpoint = new ActivationCheckpoint($activationCheckpointEnabled);
 
-                // Ordered checkpoints
+                /*
+                 * Ordered checkpoints
+                 */
                 $orderedCheckpoints = [];
 
                 if (!empty($checkpointsList)) {
 
-                    foreach ($checkpointsList as $checkpointName) {
+                    foreach ($checkpointsList as $cpName) {
 
-                        if ($checkpointName === 'throttle') {
+                        if ($cpName === 'throttle') {
 
                             $orderedCheckpoints[] = $throttleCheckpoint;
 
-                        } elseif ($checkpointName === 'activation') {
+                        } elseif ($cpName === 'activation') {
 
                             $orderedCheckpoints[] = $activationCheckpoint;
                         }
@@ -310,31 +311,30 @@ final class NormalizeConfig {
                 break;
 
             default:
-
                 throw new \InvalidArgumentException('Unsupported adapter: ' . $adapterName);
         }
 
         /*
-         * 2) Hasher
-         */
-        $hasherRaw      = $configuration['hasher'] ?? 'native';
-        $passwordHasher = NativePasswordHasher::resolveHasher($hasherRaw);
-
-        /*
-         * 3) Logger (optional) – built via LogManager
+         * 3) Logger
          */
         $loggerInstance = LogManager::build($configuration['logger'] ?? null);
 
         /*
          * 4) Services
          */
+        $activationManager = new ActivationManager(
+            $usersRepository,
+            $activationsRepository,
+            $persistencesRepository,
+            $loggerInstance
+        );
+
         $roleManager = new RoleManager(
             $rolesRepository,
             $loggerInstance,
             $automaticallyCreateMissingRoles
         );
 
-        // PermissionManager is ALWAYS combined; boolean controls auto-create
         $permissionManager = new PermissionManager(
             $permissionsRepository,
             $rolesRepository,
@@ -342,6 +342,9 @@ final class NormalizeConfig {
             $automaticallyCreateMissingPermissions
         );
 
+        /*
+         * AuthManager — final assembly
+         */
         $authManager = new AuthManager(
             $usersRepository,
             $activationsRepository,
@@ -351,7 +354,6 @@ final class NormalizeConfig {
             $loggerInstance
         );
 
-        // ✅ Wiring-hint: give AuthManager the security components (ordered checkpoints + instances + policy)
         $authManager->configureSecurity(
             $orderedCheckpoints,
             $throttleCheckpoint,
@@ -360,7 +362,7 @@ final class NormalizeConfig {
         );
 
         /*
-         * 5) Canonical structure (repositories + hasher + optional logger + services)
+         * Canonical structure returned to Sentinel::deploy()
          */
         $canonical = [
             'repositories' => [
@@ -372,8 +374,9 @@ final class NormalizeConfig {
                 'permissions'  => $permissionsRepository,
                 'throttle'     => $throttleRepository,
             ],
-            'hasher'   => $passwordHasher,
+            'hasher' => $passwordHasher,
             'services' => [
+                'activation'  => $activationManager,
                 'auth'        => $authManager,
                 'roles'       => $roleManager,
                 'permissions' => $permissionManager,
