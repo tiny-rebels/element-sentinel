@@ -100,24 +100,27 @@ class EloquentCredentialsRepository implements CredentialsRepositoryInterface {
      *
      * @param UserInterface $user
      *
-     * @param string        $newHash
+     * @param string $newHash
      *
      * @return void
      */
-    public function updatePassword(UserInterface $user, $newHash): void {
+    public function updatePassword(UserInterface $user, string $newHash): void {
 
         if (is_object($user)) {
 
-            if (property_exists($user, 'password')) {
+            if (method_exists($user, 'setAttribute')) {
 
-                $user->password = $newHash;
+                $user->setAttribute('password', $newHash);
 
             } elseif (method_exists($user, 'setPassword')) {
 
                 $user->setPassword($newHash);
+
+            } else {
+
+                $user->password = $newHash;
             }
         }
-        // Persisting is handled by the caller via UserRepository::save()
     }
 
     /**

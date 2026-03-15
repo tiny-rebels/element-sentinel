@@ -308,6 +308,44 @@ final class Sentinel {
     }
 
     /**
+     * Update a user's password.
+     *
+     * This static helper delegates the password update workflow to the configured
+     * AuthManager instance. The AuthManager resolves the user, optionally verifies
+     * the current password, hashes the new password using the configured hasher,
+     * and persists the change via the credentials repository.
+     *
+     * Security:
+     * - This method never logs plaintext passwords, and neither should callers.
+     *
+     * @param mixed  $id
+     *        The user identifier (typically the primary key).
+     * @param string $newPassword
+     *        The new plaintext password (will be hashed by the AuthManager).
+     * @param bool $verifyCurrent
+     *        If TRUE, the provided $currentPassword must match the user's current password.
+     * @param string $currentPassword
+     *        The current plaintext password used for verification when $verifyCurrent === TRUE.
+     *
+     * @return bool
+     *         TRUE on success; FALSE when the user is not found or verification fails.
+     *
+     * @throws \RuntimeException
+     *         When the Auth service is not configured on Sentinel.
+     */
+    public static function updatePassword($id, string $newPassword, bool $verifyCurrent = false, string $currentPassword = ''): bool {
+
+        $authManager = self::instance()->services['auth'] ?? null;
+
+        if ($authManager === null) {
+
+            throw new \RuntimeException('Auth service is not configured on Sentinel.');
+        }
+
+        return $authManager->updatePassword($id, $newPassword, $verifyCurrent, $currentPassword);
+    }
+
+    /**
      * Get the configured ActivationRepository instance.
      *
      * This static helper provides direct access to the underlying activation
