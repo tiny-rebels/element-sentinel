@@ -283,7 +283,7 @@ final class AuthManager {
      *        The login identifier. In the Eloquent adapter this is strictly the user's email address.
      * @param string $password
      *        The plaintext password provided by the caller.
-     * @param \Element\Sentinel\Contracts\UserInterface|null $authenticatedUser
+     * @param UserInterface|null $authenticatedUser
      *        Output parameter. On success, this will be set to the resolved user instance.
      *        On failure, it will remain NULL.
      *
@@ -427,6 +427,113 @@ final class AuthManager {
                 'user_id'    => $user->getId(),
                 'email'      => $email,
                 'ip_address' => $ipAddress,
+            ]);
+        }
+
+        return true;
+    }
+
+    /**
+     * Update a user's password.
+     *
+     * Behavior:
+     * - Resolves the user by identifier using the configured UserRepositoryInterface.
+     * - When $verifyCurrent is TRUE, the provided $currentPassword must match the
+     *   existing password for the user; otherwise the update fails and returns FALSE.
+     * - On success (or when verification is not requested), the new password is hashed
+     *   and persisted through the CredentialsRepositoryInterface. The repository is
+     *   responsible for persisting changes to the database (see EloquentCredentialsRepository::updatePassword()).
+     *
+     * Security:
+     * - This method never logs plaintext passwords.
+     *
+     * @param mixed  $id                The user identifier (typically the primary key).
+     * @param string $newPassword       The new plaintext password (will be hashed).
+     * @param bool $verifyCurrent     If TRUE, validate $currentPassword before update.
+     * @param string $currentPassword   The current plaintext password for verification.
+     *
+     * @return bool TRUE on success; FALSE when the user is not found or verification fails.
+     *
+     * @throws \RuntimeException When the credentials repository lacks required methods.
+     */
+    public function updatePassword($id, string $newPassword, bool $verifyCurrent = false, string $currentPassword = ''): bool {
+
+        // 1) Resolve the user
+        $userIdentifier = (int) $id;
+        $user = $this->userRepository->findById($userIdentifier);
+
+        if (!$user instanceof \Element\Sentinel\Contracts\UserInterface) {
+
+            if ($this->logger) {
+
+                $this->logger->info('Password update failed: user not found', [
+                    'user_identifier' => $id,
+                ]);
+            }
+
+            return false;
+        }
+
+        // 2) Optional verification of the current password
+        if ($verifyCurrent === true) {
+
+            $isValid = false;
+
+            // Support both verifyPassword(...) and verify(...)
+            if (method_exists($this->credentialsRepository, 'verifyPassword')) {
+
+                $isValid = (bool) $this->credentialsRepository->verifyPassword($user, $currentPassword, $this->passwordHasher);
+
+            } elseif (method_exists($this->credentialsRepository, 'verify')) {
+
+                $isValid = (bool) $this->credentialsRepository->verify($user, $currentPassword, $this->passwordHasher);
+
+            } else {
+
+                throw new \RuntimeException(
+                    'Credentials repository lacks a verify method (verifyPassword or verify).'
+                );
+            }
+
+            if ($isValid !== true) {
+
+                if ($this->logger) {
+
+                    $this->logger->info('Password update failed: current password mismatch', [
+
+                        'user_id' => $user->getId(),
+                    ]);
+                }
+
+                return false;
+            }
+        }
+
+        // 3) Ensure the repository can apply the update
+        if (!method_exists($this->credentialsRepository, 'updatePassword')) {
+
+            throw new \RuntimeException('Credentials repository lacks method: updatePassword().');
+        }
+
+        // 4) Hash and delegate persistence to the repository
+        $newHash = (string) $this->passwordHasher->hash($newPassword);
+
+        if ($this->logger) {
+
+            $this->logger->info('About to update password', [
+
+                'user_id' => $user->getId(),
+            ]);
+        }
+
+        // The repository is responsible for persisting (per Solution B).
+        $this->credentialsRepository->updatePassword($user, $newHash);
+
+        if ($this->logger) {
+
+            $this->logger->info('Password updated successfully', [
+
+                'user_id' => $user->getId(),
             ]);
         }
 
