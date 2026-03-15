@@ -12,6 +12,8 @@ use Element\Sentinel\Contracts\{
 use Element\Sentinel\Infrastructure\Eloquent\EloquentPersistenceRepository;
 
 use Element\Sentinel\Services\{
+    Exceptions\Auth\InvalidCurrentPasswordException,
+    Exceptions\Auth\UserNotFoundException,
     Security\ThrottleCheckpoint,
     Security\ActivationCheckpoint
 };
@@ -441,15 +443,15 @@ final class AuthManager {
      * - When $verifyCurrent is TRUE, the provided $currentPassword must match the
      *   existing password for the user; otherwise the update fails and returns FALSE.
      * - On success (or when verification is not requested), the new password is hashed
-     *   and persisted through the CredentialsRepositoryInterface. The repository is
-     *   responsible for persisting changes to the database (see EloquentCredentialsRepository::updatePassword()).
+     *   and persisted through the CredentialsRepositoryInterface. This method will also
+     *   call $user->save() for Eloquent-backed user instances as an additional safety net.
      *
      * Security:
      * - This method never logs plaintext passwords.
      *
      * @param mixed  $id                The user identifier (typically the primary key).
      * @param string $newPassword       The new plaintext password (will be hashed).
-     * @param bool $verifyCurrent     If TRUE, validate $currentPassword before update.
+     * @param bool   $verifyCurrent     If TRUE, validate $currentPassword before update.
      * @param string $currentPassword   The current plaintext password for verification.
      *
      * @return bool TRUE on success; FALSE when the user is not found or verification fails.
@@ -457,6 +459,9 @@ final class AuthManager {
      * @throws \RuntimeException When the credentials repository lacks required methods.
      */
     public function updatePassword($id, string $newPassword, bool $verifyCurrent = false, string $currentPassword = ''): bool {
+
+        // Resolve context (useful for audit)
+        $ipAddress = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '0.0.0.0';
 
         // 1) Resolve the user
         $userIdentifier = (int) $id;
@@ -467,11 +472,13 @@ final class AuthManager {
             if ($this->logger) {
 
                 $this->logger->info('Password update failed: user not found', [
+
                     'user_identifier' => $id,
+                    'ip_address'      => $ipAddress,
                 ]);
             }
 
-            return false;
+            throw new UserNotFoundException('User not found from the provided id.');
         }
 
         // 2) Optional verification of the current password
@@ -479,7 +486,6 @@ final class AuthManager {
 
             $isValid = false;
 
-            // Support both verifyPassword(...) and verify(...)
             if (method_exists($this->credentialsRepository, 'verifyPassword')) {
 
                 $isValid = (bool) $this->credentialsRepository->verifyPassword($user, $currentPassword, $this->passwordHasher);
@@ -490,9 +496,7 @@ final class AuthManager {
 
             } else {
 
-                throw new \RuntimeException(
-                    'Credentials repository lacks a verify method (verifyPassword or verify).'
-                );
+                throw new \RuntimeException('Credentials repository lacks a verify method (verifyPassword or verify).');
             }
 
             if ($isValid !== true) {
@@ -501,11 +505,12 @@ final class AuthManager {
 
                     $this->logger->info('Password update failed: current password mismatch', [
 
-                        'user_id' => $user->getId(),
+                        'user_id'    => $user->getId(),
+                        'ip_address' => $ipAddress,
                     ]);
                 }
 
-                return false;
+                throw new InvalidCurrentPasswordException('The provided current password does not match the user\'s existing password.');
             }
         }
 
@@ -515,25 +520,48 @@ final class AuthManager {
             throw new \RuntimeException('Credentials repository lacks method: updatePassword().');
         }
 
-        // 4) Hash and delegate persistence to the repository
+        // 4) Hash and delegate to the repository
         $newHash = (string) $this->passwordHasher->hash($newPassword);
 
         if ($this->logger) {
 
             $this->logger->info('About to update password', [
 
-                'user_id' => $user->getId(),
+                'user_id'    => $user->getId(),
+                'ip_address' => $ipAddress,
             ]);
         }
 
-        // The repository is responsible for persisting (per Solution B).
+        // The repository assigns the hash and (per Solution B) persists to the database.
         $this->credentialsRepository->updatePassword($user, $newHash);
+
+        // 5) EXTRA SAFETY: persist again when the user is an Eloquent model
+        if ($user instanceof \Illuminate\Database\Eloquent\Model) {
+
+            // Optional: log dirty set after assignment (diagnostic)
+            if ($this->logger) {
+
+                $this->logger->info('Dirty before save (post-repo)', ['dirty' => $user->getDirty()]);
+            }
+
+            $savedOk = $user->save();
+
+            if ($this->logger) {
+
+                $this->logger->info('Password saved to database (AuthManager safety save)', [
+
+                    'user_id' => $user->getId(),
+                    'ok'      => (bool) $savedOk,
+                ]);
+            }
+        }
 
         if ($this->logger) {
 
             $this->logger->info('Password updated successfully', [
 
-                'user_id' => $user->getId(),
+                'user_id'    => $user->getId(),
+                'ip_address' => $ipAddress,
             ]);
         }
 
